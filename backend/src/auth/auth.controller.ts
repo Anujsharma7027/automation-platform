@@ -8,6 +8,7 @@ import { ResetPasswordDto } from './dto/reset-password.dto/reset-password.dto';
 import { SigninDto } from './dto/signin.dto/signin.dto';
 import { SignupDto } from './dto/signup.dto/signup.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto/verify-email.dto';
+import { GoogleAuthDto } from './dto/google-auth.dto/google-auth.dto';
 import { JwtAuthGuard } from './guards/jwt-auth/jwt-auth.guard';
 import { AuthService } from './auth.service';
 import { UsersService } from '../users/users.service';
@@ -20,6 +21,7 @@ export class AuthController {
   @Post('verify-email') verifyEmail(@Body() dto: VerifyEmailDto) { return this.auth.verifyEmail(dto.email, dto.code); }
   @Post('resend-otp') resendOtp(@Body() dto: ResendOtpDto) { return this.auth.resendOtp(dto.email, dto.purpose); }
   @Post('signin') signin(@Body() dto: SigninDto) { return this.auth.signin(dto.email, dto.password); }
+  @Post('google') google(@Body() dto: GoogleAuthDto) { return this.auth.signinWithGoogle(dto.idToken); }
   @Post('forgot-password') forgotPassword(@Body() dto: ForgotPasswordDto) { return this.auth.forgotPassword(dto.email); }
   @Post('reset-password') resetPassword(@Body() dto: ResetPasswordDto) { return this.auth.resetPassword(dto.email, dto.code, dto.password); }
 

@@ -1,5 +1,5 @@
 import {
-  BadRequestException, ConflictException, Injectable, HttpException, HttpStatus, UnauthorizedException,
+  BadRequestException, ConflictException, Injectable, HttpException, HttpStatus, ServiceUnavailableException, UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
@@ -7,6 +7,7 @@ import { JwtService } from '@nestjs/jwt';
 import * as argon2 from 'argon2';
 import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { Model, Types } from 'mongoose';
+import { OAuth2Client } from 'google-auth-library';
 import { MailService } from '../mail/mail.service';
 import { UsersService, normalizeEmail } from '../users/users.service';
 import { EmailOtp } from './schemas/email-otp.schema/email-otp.schema';
@@ -18,6 +19,7 @@ const OTP_MAX_ATTEMPTS = 5;
 const ACCESS_TTL_SECONDS = 15 * 60;
 const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const GENERIC_RESET_RESPONSE = { message: 'If an account exists for this email, a reset code has been sent.' };
+const googleTokenVerifier = new OAuth2Client();
 
 @Injectable()
 export class AuthService {
@@ -42,7 +44,7 @@ export class AuthService {
       throw error;
     }
     try {
-      await this.sendOtp(user.id, user.email, user.name, 'verification');
+      await this.sendOtp(user.id, user.email, user.profile?.name ?? user.name ?? user.email.split('@')[0], 'verification');
       return { message: 'Account created. Check your email for a verification code.', email: user.email };
     } catch (error) {
       // Keep the account so a temporary mail outage does not turn signup into a lost request.
@@ -71,7 +73,7 @@ export class AuthService {
       return { message: purpose === 'verification' ? 'If verification is needed, a code has been sent.' : GENERIC_RESET_RESPONSE.message };
     }
     try {
-      await this.sendOtp(user.id, user.email, user.name, purpose);
+      await this.sendOtp(user.id, user.email, user.profile?.name ?? user.name ?? user.email.split('@')[0], purpose);
       return { message: 'A new code has been sent.' };
     } catch (error) {
       if (error instanceof HttpException && error.getStatus() === HttpStatus.TOO_MANY_REQUESTS) throw error;
@@ -81,14 +83,72 @@ export class AuthService {
 
   async signin(emailInput: string, password: string) {
     const user = await this.users.findByEmail(emailInput, true);
-    if (!user || !(await argon2.verify(user.passwordHash, password))) throw new UnauthorizedException('Invalid email or password');
+    if (!user?.passwordHash || !(await argon2.verify(user.passwordHash, password))) throw new UnauthorizedException('Invalid email or password');
     if (!user.isEmailVerified) throw new UnauthorizedException('Please verify your email before signing in');
     return this.issueTokens(user.id);
   }
 
+  async signinWithGoogle(idToken: string) {
+    const clientIds = (this.config.get<string>('GOOGLE_OAUTH_CLIENT_IDS') ?? '')
+      .split(',').map((value) => value.trim()).filter(Boolean);
+    if (!clientIds.length) throw new ServiceUnavailableException('Google sign-in is not configured on the server');
+
+    let payload;
+    try {
+      const ticket = await googleTokenVerifier.verifyIdToken({ idToken, audience: clientIds });
+      payload = ticket.getPayload();
+    } catch {
+      throw new UnauthorizedException('Google sign-in token is invalid or expired');
+    }
+    if (!payload || !payload.sub || !payload.email || payload.email_verified !== true ||
+        !['accounts.google.com', 'https://accounts.google.com'].includes(payload.iss ?? '')) {
+      throw new UnauthorizedException('Google account must have a verified email address');
+    }
+
+    const email = normalizeEmail(payload.email);
+    const tokenProfile = {
+      name: payload.name?.trim() || email.split('@')[0],
+      ...(payload.given_name ? { firstName: payload.given_name.trim() } : {}),
+      ...(payload.family_name ? { lastName: payload.family_name.trim() } : {}),
+      ...(payload.picture ? { avatarUrl: payload.picture } : {}),
+    };
+    const existingGoogleUser = await this.users.findByGoogleSub(payload.sub);
+    if (existingGoogleUser) {
+      const updated = await this.users.updateGoogleSignIn(existingGoogleUser.id, payload.sub, tokenProfile);
+      if (!updated) throw new ConflictException('This Google account could not be updated');
+      return this.issueTokens(updated.id);
+    }
+
+    // An email match is not enough to prove identity or link a Google account.
+    if (await this.users.findByEmail(email)) {
+      throw new ConflictException('This email already has an account. Sign in with that account before linking Google.');
+    }
+
+    try {
+      const user = await this.users.create({
+        email,
+        profile: tokenProfile,
+        provider: 'google',
+        googleSub: payload.sub,
+        emailVerified: true,
+        isEmailVerified: true,
+        lastLoginAt: new Date(),
+      });
+      return this.issueTokens(user.id);
+    } catch (error) {
+      if (!isDuplicateKey(error)) throw error;
+      // Concurrent requests for the same Google identity converge on one user.
+      const racedUser = await this.users.findByGoogleSub(payload.sub);
+      if (!racedUser) throw new ConflictException('An account with this email already exists and could not be linked');
+      const updated = await this.users.updateGoogleSignIn(racedUser.id, payload.sub, tokenProfile);
+      if (!updated) throw new ConflictException('This Google account could not be updated');
+      return this.issueTokens(updated.id);
+    }
+  }
+
   async forgotPassword(emailInput: string) {
     const user = await this.users.findByEmail(emailInput);
-    if (user) await this.sendOtp(user.id, user.email, user.name, 'password-reset');
+    if (user) await this.sendOtp(user.id, user.email, user.profile?.name ?? user.name ?? user.email.split('@')[0], 'password-reset');
     return GENERIC_RESET_RESPONSE;
   }
 
