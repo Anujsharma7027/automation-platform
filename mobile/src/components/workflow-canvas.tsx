@@ -400,15 +400,68 @@ function Drawer({
   );
 }
 
+const TRIGGER_EVENTS: Record<string, string[]> = {
+  gmail: ['New Email', 'New Email Matching Search', 'New Attachment'],
+  slack: ['New Message', 'New Mention'], drive: ['New File', 'New File in Folder'],
+  discord: ['New Message'], notion: ['New Database Item', 'New Page'],
+  webhooks: ['Catch a Webhook'],
+};
+
+function AppConfigDrawer({
+  app: selectedApp, event, onEvent, tab, onTab, anim, onClose, onChange,
+}: {
+  app: AppDef; event: string; onEvent: (event: string) => void;
+  tab: 'Setup' | 'Test'; onTab: (tab: 'Setup' | 'Test') => void;
+  anim: Animated.Value; onClose: () => void; onChange: () => void;
+}) {
+  const insets = useSafeAreaInsets();
+  const { height } = useWindowDimensions();
+  const [accountMessage, setAccountMessage] = useState('');
+  const [eventsOpen, setEventsOpen] = useState(false);
+  const options = TRIGGER_EVENTS[selectedApp.id] ?? [`New ${selectedApp.label} Event`];
+  const translateY = anim.interpolate({ inputRange: [0, 1], outputRange: [height, 0] });
+  const scrimOpacity = anim.interpolate({ inputRange: [0, 1], outputRange: [0, 0.42] });
+  return <View style={styles.drawerLayer}>
+    <Animated.View style={[styles.scrim, { opacity: scrimOpacity }]}><Pressable accessibilityLabel="Close configuration" onPress={onClose} style={{ flex: 1 }} /></Animated.View>
+    <Animated.View style={[styles.configDrawer, { paddingBottom: Math.max(insets.bottom, 16), transform: [{ translateY }] }]}>
+      <View style={styles.configHeader}>
+        <View style={[styles.configIcon, { backgroundColor: selectedApp.bg }]}><IconifyIcon name={selectedApp.icon} size={24} /></View>
+        <View style={{ flex: 1 }}><Text style={styles.configEyebrow}>STEP 1 · TRIGGER</Text><Text style={styles.configTitle}>Select the event</Text></View>
+        <Pressable accessibilityLabel="Close configuration" onPress={onClose} style={styles.closeBtn}><IconifyIcon color="#1B1C1E" name="lucide:x" size={20} /></Pressable>
+      </View>
+      <View style={styles.configTabs}>
+        {(['Setup', 'Test'] as const).map((item) => <Pressable key={item} onPress={() => onTab(item)} style={[styles.configTab, tab === item && styles.configTabActive]}><Text style={[styles.configTabText, tab === item && styles.configTabTextActive]}>{item}</Text></Pressable>)}
+      </View>
+      {tab === 'Setup' ? <ScrollView contentContainerStyle={styles.configContent} keyboardShouldPersistTaps="handled">
+        <Text style={styles.configLabel}>APP</Text>
+        <View style={styles.configAppRow}><View style={[styles.configSmallIcon, { backgroundColor: selectedApp.bg }]}><IconifyIcon name={selectedApp.icon} size={20} /></View><Text style={styles.configAppName}>{selectedApp.label}</Text><Pressable onPress={onChange}><Text style={styles.changeText}>Change</Text></Pressable></View>
+        <Text style={styles.configLabel}>TRIGGER EVENT <Text style={styles.required}>*</Text></Text>
+        <Text style={styles.configHint}>Choose what starts this workflow.</Text>
+        <Pressable accessibilityRole="button" accessibilityLabel="Choose trigger event" onPress={() => setEventsOpen((open) => !open)} style={styles.eventSelect}><Text style={[styles.eventSelectText, !event && styles.eventSelectPlaceholder]}>{event || 'Select an event'}</Text><IconifyIcon color="#747771" name={eventsOpen ? 'lucide:chevron-up' : 'lucide:chevron-down'} size={17} /></Pressable>
+        {eventsOpen ? <View style={styles.eventOptions}>{options.map((option) => <Pressable key={option} accessibilityRole="radio" accessibilityState={{ selected: event === option }} onPress={() => { onEvent(option); setEventsOpen(false); }} style={[styles.eventOption, event === option && styles.eventOptionSelected]}><View style={[styles.radioOuter, event === option && styles.radioOuterSelected]}>{event === option ? <View style={styles.radioInner} /> : null}</View><Text style={styles.eventText}>{option}</Text></Pressable>)}</View> : <View style={{ marginBottom: 20 }} />}
+        <Text style={styles.configLabel}>ACCOUNT</Text>
+        <View style={styles.accountCard}><View style={{ flex: 1 }}><Text style={styles.accountTitle}>Connect {selectedApp.label}</Text><Text style={styles.configHint}>Choose an account to use with this workflow.</Text></View><Pressable onPress={() => setAccountMessage(`${selectedApp.label} sign in will be implemented later.`)} style={styles.signInButton}><Text style={styles.signInText}>Sign in</Text></Pressable></View>
+        <Text style={styles.accountNote}>{accountMessage || 'Account connection will be available soon.'}</Text>
+      </ScrollView> : <View style={[styles.configContent, { flex: 1 }]}><Text style={styles.configHint}>Test your {selectedApp.label} trigger after setup is complete.</Text></View>}
+      <View style={styles.configFooter}><Pressable disabled={!event || tab !== 'Setup'} style={[styles.continueButton, (!event || tab !== 'Setup') && styles.continueDisabled]}><Text style={styles.continueText}>Continue</Text><IconifyIcon color="#FFFFFF" name="lucide:arrow-right" size={17} /></Pressable></View>
+    </Animated.View>
+  </View>;
+}
+
 export function WorkflowCanvas() {
   const [nodes, setNodes] = useState<FlowNode[]>([]);
   const [history, setHistory] = useState<FlowNode[][]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const header = useHeaderMetrics();
   const [target, setTarget] = useState<DrawerTarget | null>(null);
+  const [configApp, setConfigApp] = useState<AppDef | null>(null);
+  const [editingConfigNode, setEditingConfigNode] = useState<string | null>(null);
+  const [triggerEvent, setTriggerEvent] = useState('');
+  const [configTab, setConfigTab] = useState<'Setup' | 'Test'>('Setup');
   const [running, setRunning] = useState(false);
   const [view, setView] = useState({ w: 390, h: 640 });
   const drawerAnim = useRef(new Animated.Value(0)).current;
+  const [configAnim] = useState(() => new Animated.Value(0));
   const [aiOpen, setAiOpen] = useState(false);
 
   const { pos, width, height } = useMemo(() => layout(nodes), [nodes]);
@@ -592,6 +645,7 @@ export function WorkflowCanvas() {
   };
 
   const openDrawer = (t: DrawerTarget) => {
+    setConfigApp(null);
     setTarget(t);
     drawerAnim.setValue(0);
     Animated.spring(drawerAnim, {
@@ -614,6 +668,19 @@ export function WorkflowCanvas() {
     });
   }, [drawerAnim]);
 
+  const closeConfig = () => {
+    Animated.timing(configAnim, { toValue: 0, duration: 240, easing: Easing.out(Easing.cubic), useNativeDriver: NATIVE }).start(({ finished }) => {
+      if (finished) setConfigApp(null);
+    });
+  };
+
+  const changeConfigApp = () => {
+    Animated.timing(configAnim, { toValue: 0, duration: 180, useNativeDriver: NATIVE }).start();
+    setEditingConfigNode(selected);
+    setConfigApp(null);
+    openDrawer({ mode: 'child', parent: null });
+  };
+
   const commit = (next: FlowNode[]) => {
     setHistory((h) => [...h.slice(-30), nodes]);
     setNodes(next);
@@ -621,15 +688,27 @@ export function WorkflowCanvas() {
 
   const pick = (a: AppDef) => {
     if (!target) return;
-    const key = `n${Date.now()}`;
-    const node: FlowNode = { ...a, key, parent: target.parent };
-    if (target.mode === 'insert') {
-      commit([...nodes.map((n) => (n.key === target.child ? { ...n, parent: key } : n)), node]);
+    const editNode = editingConfigNode ? nodes.find((n) => n.key === editingConfigNode) : undefined;
+    const key = editNode?.key ?? `n${Date.now()}`;
+    if (editNode) {
+      commit(nodes.map((n) => n.key === key ? { ...a, key, parent: n.parent } : n));
     } else {
-      commit([...nodes, node]);
+      const node: FlowNode = { ...a, key, parent: target.parent };
+      if (target.mode === 'insert') {
+        commit([...nodes.map((n) => (n.key === target.child ? { ...n, parent: key } : n)), node]);
+      } else {
+        commit([...nodes, node]);
+      }
     }
     setSelected(key);
+    setEditingConfigNode(null);
+    setConfigApp(a);
+    setTriggerEvent('');
+    setConfigTab('Setup');
     closeDrawer();
+    setTimeout(() => {
+      Animated.spring(configAnim, { toValue: 1, damping: 26, stiffness: 210, useNativeDriver: NATIVE }).start();
+    }, 270);
   };
 
   const remove = (key: string) => {
@@ -1206,6 +1285,7 @@ export function WorkflowCanvas() {
         {target ? (
           <Drawer anim={drawerAnim} onClose={closeDrawer} onPick={pick} title={drawerTitle} />
         ) : null}
+        {configApp ? <AppConfigDrawer app={configApp} event={triggerEvent} onEvent={setTriggerEvent} tab={configTab} onTab={setConfigTab} anim={configAnim} onClose={closeConfig} onChange={changeConfigApp} /> : null}
       </View>
     </View>
   );
@@ -1566,6 +1646,48 @@ drawer: {
   elevation: 30,
   overflow: 'hidden',
 },
+  configDrawer: {
+    position: 'absolute', left: 0, right: 0, bottom: 0, height: '88%',
+    borderTopLeftRadius: 28, borderTopRightRadius: 28, backgroundColor: '#FFFFFF',
+    paddingHorizontal: 22, overflow: 'hidden', shadowColor: '#101114', shadowOpacity: 0.18,
+    shadowRadius: 32, shadowOffset: { width: 0, height: -8 }, elevation: 30,
+  },
+  configHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingTop: 22, paddingBottom: 18 },
+  configIcon: { width: 46, height: 46, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
+  configEyebrow: { fontSize: 10, fontWeight: '700', color: '#858781', letterSpacing: 0.7 },
+  configTitle: { marginTop: 3, fontSize: 19, fontWeight: '700', color: '#1B1C1E', letterSpacing: -0.4 },
+  configTabs: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#ECEDEA', gap: 24 },
+  configTab: { paddingVertical: 12, borderBottomWidth: 2, borderBottomColor: 'transparent' },
+  configTabActive: { borderBottomColor: '#141518' },
+  configTabText: { fontSize: 14, fontWeight: '600', color: '#898B85' },
+  configTabTextActive: { color: '#141518' },
+  configContent: { paddingTop: 22, paddingBottom: 24 },
+  configLabel: { fontSize: 10, fontWeight: '800', color: '#777A74', letterSpacing: 0.8, marginBottom: 10, marginTop: 8 },
+  configAppRow: { minHeight: 58, paddingHorizontal: 12, borderWidth: 1, borderColor: '#E8E9E6', borderRadius: 13, flexDirection: 'row', alignItems: 'center', gap: 11, marginBottom: 22 },
+  configSmallIcon: { width: 34, height: 34, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  configAppName: { flex: 1, color: '#222326', fontSize: 14, fontWeight: '600' },
+  changeText: { color: '#42454A', fontSize: 13, fontWeight: '700', padding: 8 },
+  required: { color: '#E5484D' },
+  configHint: { color: '#858781', fontSize: 12, lineHeight: 17, marginBottom: 10 },
+  eventOptions: { borderWidth: 1, borderColor: '#E8E9E6', borderRadius: 13, overflow: 'hidden', marginBottom: 20 },
+  eventSelect: { minHeight: 48, borderWidth: 1, borderColor: '#E1E3DF', borderRadius: 12, paddingHorizontal: 13, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  eventSelectText: { fontSize: 13, color: '#292A2C', fontWeight: '500' },
+  eventSelectPlaceholder: { color: '#9A9C96' },
+  eventOption: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 13, borderBottomWidth: 1, borderBottomColor: '#F0F0EE' },
+  eventOptionSelected: { backgroundColor: '#F8F8F6' },
+  radioOuter: { width: 17, height: 17, borderRadius: 9, borderWidth: 1.5, borderColor: '#B7BAB3', alignItems: 'center', justifyContent: 'center' },
+  radioOuterSelected: { borderColor: '#242528' },
+  radioInner: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#242528' },
+  eventText: { fontSize: 13, color: '#292A2C', fontWeight: '500' },
+  accountCard: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 13, borderWidth: 1, borderColor: '#E8E9E6', borderRadius: 13 },
+  accountTitle: { fontSize: 13, fontWeight: '700', color: '#242528', marginBottom: 3 },
+  signInButton: { paddingVertical: 8, paddingHorizontal: 13, borderRadius: 9, backgroundColor: '#F1F2F0' },
+  signInText: { color: '#292A2C', fontSize: 12, fontWeight: '700' },
+  accountNote: { marginTop: 8, fontSize: 11, color: '#8B8D87' },
+  configFooter: { paddingTop: 12, borderTopWidth: 1, borderTopColor: '#ECEDEA' },
+  continueButton: { height: 48, borderRadius: 13, backgroundColor: '#17181A', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  continueDisabled: { backgroundColor: '#BFC1BC' },
+  continueText: { color: '#FFFFFF', fontSize: 14, fontWeight: '700' },
 handle: {
   alignSelf: 'center',
   width: 38,

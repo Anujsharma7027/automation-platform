@@ -12,11 +12,18 @@ import {
   Text,
   TextInput,
   TextInputProps,
+  TurboModuleRegistry,
   View,
+  type TurboModule,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '@/auth/auth-context';
 import { authApi } from '@/auth/auth-api';
+import { useIdTokenAuthRequest } from 'expo-auth-session/providers/google';
+import * as WebBrowser from 'expo-web-browser';
+import type * as NativeGoogleAuth from 'react-native-nitro-google-signin';
+
+WebBrowser.maybeCompleteAuthSession();
 
 const ACCENT = '#FFFFFF';
 const INK = '#1D1D1F';
@@ -159,16 +166,215 @@ function useAction() {
   return { busy, message, error, run, setNotice };
 }
 
-function OutlineButton({ icon, label, onPress }: { icon: ReactNode; label: string; onPress?: () => void }) {
+function OutlineButton({ icon, label, onPress, disabled = false, iconOnly = false, accessibilityLabel }: { icon: ReactNode; label: string; onPress?: () => void; disabled?: boolean; iconOnly?: boolean; accessibilityLabel?: string }) {
   return (
     <Pressable
       accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel ?? label}
+      accessibilityState={{ disabled }}
+      disabled={disabled}
       onPress={onPress}
-      style={({ pressed }) => [styles.outlineButton, pressed && styles.outlinePressed]}>
-      <View style={styles.outlineIcon}>{icon}</View>
-      <Text style={styles.outlineLabel}>{label}</Text>
+      style={({ pressed }) => [styles.outlineButton, iconOnly && styles.outlineIconOnly, disabled && styles.outlineDisabled, pressed && styles.outlinePressed]}>
+      <View style={iconOnly ? styles.outlineIconCentered : styles.outlineIcon}>{icon}</View>
+      {!iconOnly && <Text style={styles.outlineLabel}>{label}</Text>}
     </Pressable>
   );
+}
+
+function GoogleSignInButton({ showLabel = false }: { showLabel?: boolean }) {
+  const googleClientId = Platform.select({
+    android: process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID,
+    ios: process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID,
+    default: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
+  });
+  const webClientId = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID;
+  const nativeClientId = Platform.OS === 'ios'
+    ? process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID
+    : process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID;
+  if (!googleClientId || (Platform.OS !== 'web' && (!webClientId || !nativeClientId))) {
+    return <GoogleSignInUnavailableButton message="Google sign-in needs OAuth client IDs. Add them to mobile/.env and backend/.env, then restart the app." />;
+  }
+  if (Platform.OS === 'web') return <WebGoogleSignInButton showLabel={showLabel} />;
+  if (!hasNativeNitroModules()) {
+    return <GoogleSignInUnavailableButton message="This app build does not include the Google sign-in native module. Rebuild the Expo development app, then restart it." />;
+  }
+  return <NativeGoogleSignInButton showLabel={showLabel} />;
+}
+
+function hasNativeNitroModules() {
+  try {
+    return TurboModuleRegistry.get<TurboModule>('NitroModules') != null;
+  } catch {
+    return false;
+  }
+}
+
+let nativeGoogleAuthPromise: Promise<typeof NativeGoogleAuth> | null = null;
+
+function loadNativeGoogleAuth() {
+  if (!nativeGoogleAuthPromise) {
+    nativeGoogleAuthPromise = import('react-native-nitro-google-signin')
+      .then((nativeGoogle) => {
+        nativeGoogle.GoogleOneTapSignIn.configure({
+          webClientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID!,
+          iosClientId: process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID,
+        });
+        return nativeGoogle;
+      })
+      .catch((error: unknown) => {
+        nativeGoogleAuthPromise = null;
+        throw error;
+      });
+  }
+  return nativeGoogleAuthPromise;
+}
+
+function GoogleSignInUnavailableButton({ message: explanation }: { message: string }) {
+  return <View style={styles.googleControl}>
+    <OutlineButton disabled icon={<IconifyIcon name="logos:google-icon" size={16} />} label="Google sign-in unavailable" />
+    <FormFeedback error message={explanation} />
+  </View>;
+}
+
+function NativeGoogleSignInButton({ showLabel }: { showLabel: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [nativeReady, setNativeReady] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState(false);
+  const busyRef = useRef(false);
+  const nativeGoogleRef = useRef<typeof NativeGoogleAuth | null>(null);
+  const { acceptTokens } = useAuth();
+
+  useEffect(() => {
+    let alive = true;
+    loadNativeGoogleAuth().then((nativeGoogle) => {
+      if (alive) {
+        nativeGoogleRef.current = nativeGoogle;
+        setNativeReady(true);
+      }
+    }).catch(() => {
+      if (alive) {
+        setError(true);
+        setMessage('Google sign-in needs an Expo development build.');
+      }
+    });
+    return () => { alive = false; };
+  }, []);
+
+  const signInWithGoogle = async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setError(false);
+    setMessage('');
+    try {
+      const nativeGoogle = nativeGoogleRef.current;
+      if (!nativeGoogle) throw new Error('Google sign-in needs an Expo development build.');
+      if (Platform.OS === 'android') await nativeGoogle.GoogleOneTapSignIn.checkPlayServices();
+      // `signIn()` restores an authorized account on Android. Use the package's
+      // interactive flow so users can choose any device account on every attempt.
+      let result = await nativeGoogle.GoogleOneTapSignIn.createAccount();
+      if (nativeGoogle.isNoSavedCredentialFoundResponse(result)) result = await nativeGoogle.GoogleOneTapSignIn.presentExplicitSignIn();
+      if (nativeGoogle.isCancelledResponse(result)) {
+        setMessage('Google sign-in was cancelled.');
+        return;
+      }
+      if (!nativeGoogle.isSuccessResponse(result) || !result.data.idToken) {
+        throw new Error('Google did not return a valid sign-in token. Please try again.');
+      }
+      await acceptTokens(await authApi.google({ idToken: result.data.idToken }));
+      router.replace('/dashboard');
+    } catch (caught) {
+      setError(true);
+      setMessage(caught instanceof Error ? caught.message : 'Google sign-in failed. Please try again.');
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  return <View style={styles.googleControl}>
+    <OutlineButton disabled={busy || !nativeReady} icon={<IconifyIcon name="logos:google-icon" size={16} />} label={showLabel ? 'Continue with Google' : ''} accessibilityLabel={busy ? 'Connecting to Google' : showLabel ? 'Continue with Google' : nativeReady ? 'Sign in with Google' : 'Preparing Google sign-in'} iconOnly={!showLabel} onPress={signInWithGoogle} />
+    <FormFeedback error={error} message={message} />
+  </View>;
+}
+
+function WebGoogleSignInButton({ showLabel }: { showLabel: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState(false);
+  const busyRef = useRef(false);
+  const handledResponse = useRef(false);
+  const { acceptTokens } = useAuth();
+  const [request, response, promptAsync] = useIdTokenAuthRequest({
+    webClientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
+    androidClientId: process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID,
+    iosClientId: process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID,
+    selectAccount: true,
+    scopes: ['openid', 'email', 'profile'],
+  });
+
+  useEffect(() => {
+    if (response?.type === 'error' && busyRef.current) {
+      busyRef.current = false;
+      setBusy(false);
+      setError(true);
+      setMessage(response.error?.message || 'Google sign-in failed. Please try again.');
+      return;
+    }
+    if (response?.type !== 'success' || !response.params.id_token || handledResponse.current) return;
+    handledResponse.current = true;
+    void (async () => {
+      try {
+        await acceptTokens(await authApi.google({ idToken: response.params.id_token }));
+        router.replace('/dashboard');
+      } catch (caught) {
+        setError(true);
+        setMessage(caught instanceof Error ? caught.message : 'Google sign-in failed. Please try again.');
+        busyRef.current = false;
+        setBusy(false);
+      }
+    })();
+  }, [acceptTokens, response]);
+
+  const signInWithGoogle = async () => {
+    if (busyRef.current) return;
+    if (!request) {
+      setError(true);
+      setMessage('Google sign-in is still initializing. Please try again.');
+      return;
+    }
+    busyRef.current = true;
+    handledResponse.current = false;
+    setBusy(true);
+    setError(false);
+    setMessage('');
+    try {
+      const result = await promptAsync();
+      if (result.type === 'cancel' || result.type === 'dismiss') {
+        busyRef.current = false;
+        setBusy(false);
+        setMessage('Google sign-in was cancelled.');
+      } else if (result.type === 'error') {
+        busyRef.current = false;
+        setBusy(false);
+        setError(true);
+        setMessage(result.error?.message || 'Google sign-in failed. Please try again.');
+      }
+      // On native, Expo exchanges Google's authorization code for an ID token;
+      // the response effect completes the app login once that exchange finishes.
+    } catch (caught) {
+      busyRef.current = false;
+      setBusy(false);
+      setError(true);
+      setMessage(caught instanceof Error ? caught.message : 'Google sign-in failed. Please try again.');
+    }
+  };
+
+  return <View style={styles.googleControl}>
+    <OutlineButton disabled={busy} icon={<IconifyIcon name="logos:google-icon" size={16} />} label={showLabel ? 'Continue with Google' : ''} accessibilityLabel={busy ? 'Connecting to Google' : showLabel ? 'Continue with Google' : 'Sign in with Google'} iconOnly={!showLabel} onPress={signInWithGoogle} />
+    <FormFeedback error={error} message={message} />
+  </View>;
 }
 
 function Divider({ label }: { label: string }) {
@@ -195,11 +401,10 @@ function AuthSwitch({ label, link, onPress }: { label: string; link: string; onP
 function SocialRow() {
   return (
     <View style={styles.socialRow}>
-      {(['logos:google-icon', 'simple-icons:apple'] as const).map((name) => (
-        <Pressable key={name} style={({ pressed }) => [styles.socialButton, pressed && styles.outlinePressed]}>
-          <IconifyIcon color="#FFFFFF" name={name} size={18} />
-        </Pressable>
-      ))}
+      <View style={{ flex: 1 }}><GoogleSignInButton /></View>
+      <Pressable accessibilityLabel="Continue with Apple" accessibilityRole="button" style={styles.socialButton}>
+        <IconifyIcon color="#FFFFFF" name="simple-icons:apple" size={18} />
+      </Pressable>
     </View>
   );
 }
@@ -264,7 +469,7 @@ function SignInMethods({ onEmail }: { onEmail: () => void }) {
         </View>
         <View style={styles.socialStack}>
           <OutlineButton icon={<IconifyIcon color="#FFFFFF" name="lucide:mail" size={17} />} label="Continue with email" onPress={onEmail} />
-          <OutlineButton icon={<IconifyIcon name="logos:google-icon" size={16} />} label="Continue with Google" />
+          <GoogleSignInButton showLabel />
           <OutlineButton icon={<IconifyIcon color="#FFFFFF" name="simple-icons:apple" size={17} />} label="Continue with Apple" />
         </View>
         <AuthSwitch label="New to Taskvyn?" link="Sign Up" onPress={() => router.replace('/sign-up')} />
@@ -508,7 +713,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   outlinePressed: { backgroundColor: '#141417', borderColor: '#45454B', transform: [{ scale: 0.985 }] },
+  outlineDisabled: { opacity: 0.58 },
+  outlineIconOnly: { alignItems: 'center', justifyContent: 'center' },
+  googleControl: { gap: 2 },
   outlineIcon: { left: 22, position: 'absolute' },
+  outlineIconCentered: { position: 'relative' },
   outlineLabel: { color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
   divider: { alignItems: 'center', flexDirection: 'row', gap: 12, marginVertical: 20 },
   dividerLine: { backgroundColor: '#222226', flex: 1, height: 1 },

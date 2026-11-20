@@ -4,8 +4,12 @@ import Constants from 'expo-constants';
 
 const configuredApiUrl = process.env.EXPO_PUBLIC_API_URL ?? Constants.expoConfig?.extra?.apiUrl;
 const expoHost = Constants.expoConfig?.hostUri?.split(':')[0];
-const API_URL = (typeof configuredApiUrl === 'string' && configuredApiUrl.trim()
-  ? configuredApiUrl.trim()
+const configuredUrl = typeof configuredApiUrl === 'string' ? configuredApiUrl.trim() : '';
+// 10.0.2.2 is only valid inside an Android emulator. Prefer the host that
+// Expo is already using so a physical device reaches the same dev machine.
+const isEmulatorHost = /^https?:\/\/10\.0\.2\.2(?::3000)?\/?$/i.test(configuredUrl);
+const API_URL = (configuredUrl && !(isEmulatorHost && expoHost)
+  ? configuredUrl
   : Platform.OS === 'web' ? 'http://localhost:3000'
   : `http://${expoHost || (Platform.OS === 'android' ? '10.0.2.2' : 'localhost')}:3000`).replace(/\/$/, '');
 const ACCESS_KEY = 'taskvyn.access-token';
@@ -97,6 +101,7 @@ export const authApi = {
   verifyEmail: (input: { email: string; code: string }) => api<Tokens>('/auth/verify-email', { method: 'POST', body: JSON.stringify(input) }),
   resendOtp: (input: { email: string; purpose: 'verification' | 'password-reset' }) => api<{ message: string }>('/auth/resend-otp', { method: 'POST', body: JSON.stringify(input) }),
   signin: (input: { email: string; password: string }) => api<Tokens>('/auth/signin', { method: 'POST', body: JSON.stringify(input) }),
+  google: (input: { idToken: string }) => api<Tokens>('/auth/google', { method: 'POST', body: JSON.stringify(input) }),
   forgotPassword: (email: string) => api<{ message: string }>('/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) }),
   resetPassword: (input: { email: string; code: string; password: string }) => api<{ message: string }>('/auth/reset-password', { method: 'POST', body: JSON.stringify(input) }),
   me: () => api<{ id: string; name: string; email: string; isEmailVerified: boolean }>('/auth/me', {}, true),
