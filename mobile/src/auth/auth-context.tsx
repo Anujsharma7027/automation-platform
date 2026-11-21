@@ -1,7 +1,7 @@
 import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { authApi, clearTokens, saveTokens } from './auth-api';
+import { ApiError, authApi, clearTokens, hasStoredSession, saveTokens } from './auth-api';
 
-type Profile = { id: string; name: string; email: string; isEmailVerified: boolean };
+export type Profile = { id: string; name: string; email: string; avatarUrl?: string | null; isEmailVerified: boolean };
 type AuthContextValue = { user: Profile | null; loading: boolean; acceptTokens: (tokens: Parameters<typeof saveTokens>[0]) => Promise<void>; signOut: () => Promise<void> };
 const AuthContext = createContext<AuthContextValue | null>(null);
 
@@ -10,7 +10,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     let alive = true;
-    authApi.me().then((profile) => { if (alive) setUser(profile); }).catch(async () => { await clearTokens(); }).finally(() => { if (alive) setLoading(false); });
+    (async () => {
+      if (!(await hasStoredSession())) return;
+      // Retry transient failures (server waking up, flaky network) instead of
+      // wiping a valid session on the first failed request after a reload.
+      for (let attempt = 0; attempt < 3 && alive; attempt++) {
+        try { const profile = await authApi.me(); if (alive) setUser(profile); return; } catch (error) {
+          if (error instanceof ApiError && (error.status === 401 || error.status === 404)) { await clearTokens(); return; }
+          await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
+        }
+      }
+    })().finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, []);
 

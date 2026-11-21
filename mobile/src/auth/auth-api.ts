@@ -10,10 +10,21 @@ const configuredUrl = typeof configuredApiUrl === 'string' ? configuredApiUrl.tr
 const isEmulatorHost = /^https?:\/\/10\.0\.2\.2(?::3000)?\/?$/i.test(configuredUrl);
 const API_URL = (configuredUrl && !(isEmulatorHost && expoHost)
   ? configuredUrl
-  : Platform.OS === 'web' ? 'http://localhost:3000'
+  // On web, reach the backend on the same host that served the page so a phone
+  // browser on the LAN does not try to call its own localhost.
+  : Platform.OS === 'web' ? `http://${typeof window !== 'undefined' && window.location?.hostname ? window.location.hostname : 'localhost'}:3000`
   : `http://${expoHost || (Platform.OS === 'android' ? '10.0.2.2' : 'localhost')}:3000`).replace(/\/$/, '');
 const ACCESS_KEY = 'taskvyn.access-token';
 const REFRESH_KEY = 'taskvyn.refresh-token';
+const REQUEST_TIMEOUT_MS = 15_000;
+
+// A fetch to an unreachable host can hang indefinitely on mobile networks,
+// which left the sign-in button permanently busy. Always bound requests.
+async function fetchWithTimeout(url: string, init: RequestInit = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try { return await fetch(url, { ...init, signal: controller.signal }); } finally { clearTimeout(timer); }
+}
 
 type Tokens = { accessToken: string; refreshToken: string; tokenType: string; expiresIn: number };
 let accessToken: string | null = null;
@@ -23,15 +34,15 @@ let refreshInFlight: Promise<boolean> | null = null;
 export function apiBaseUrl() { return API_URL; }
 
 async function get(key: string): Promise<string | null> {
-  if (Platform.OS === 'web') { try { return typeof sessionStorage === 'undefined' ? null : sessionStorage.getItem(key); } catch { return null; } }
+  if (Platform.OS === 'web') { try { return typeof localStorage === 'undefined' ? null : localStorage.getItem(key); } catch { return null; } }
   try { return await SecureStore.getItemAsync(key); } catch { return null; }
 }
 async function set(key: string, value: string): Promise<void> {
-  if (Platform.OS === 'web') { try { if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(key, value); return; } catch { throw new Error('Secure browser session storage is unavailable.'); } }
+  if (Platform.OS === 'web') { try { if (typeof localStorage !== 'undefined') localStorage.setItem(key, value); return; } catch { throw new Error('Browser storage is unavailable.'); } }
   await SecureStore.setItemAsync(key, value);
 }
 async function remove(key: string): Promise<void> {
-  if (Platform.OS === 'web') { try { if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem(key); return; } catch { return; } }
+  if (Platform.OS === 'web') { try { if (typeof localStorage !== 'undefined') localStorage.removeItem(key); return; } catch { return; } }
   await SecureStore.deleteItemAsync(key);
 }
 
@@ -57,10 +68,12 @@ async function rotateTokens(): Promise<boolean> {
       await loadTokens();
       if (!refreshToken) return false;
       try {
-        const response = await fetch(`${API_URL}/auth/refresh`, {
+        const response = await fetchWithTimeout(`${API_URL}/auth/refresh`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken }),
         });
-        if (!response.ok) { await clearTokens(); return false; }
+        // Only a rejected refresh token ends the session; transient errors keep it.
+        if (response.status === 401) { await clearTokens(); return false; }
+        if (!response.ok) return false;
         await saveTokens(await response.json() as Tokens);
         return true;
       } catch { return false; }
@@ -79,7 +92,7 @@ export async function api<T>(path: string, options: RequestInit = {}, authentica
     const headers = new Headers(options.headers);
     headers.set('Content-Type', 'application/json');
     if (authenticated && accessToken) headers.set('Authorization', `Bearer ${accessToken}`);
-    return fetch(`${API_URL}${path}`, { ...options, headers });
+    return fetchWithTimeout(`${API_URL}${path}`, { ...options, headers });
   };
   let response: Response;
   try {
@@ -104,11 +117,16 @@ export const authApi = {
   google: (input: { idToken: string }) => api<Tokens>('/auth/google', { method: 'POST', body: JSON.stringify(input) }),
   forgotPassword: (email: string) => api<{ message: string }>('/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) }),
   resetPassword: (input: { email: string; code: string; password: string }) => api<{ message: string }>('/auth/reset-password', { method: 'POST', body: JSON.stringify(input) }),
-  me: () => api<{ id: string; name: string; email: string; isEmailVerified: boolean }>('/auth/me', {}, true),
+  me: () => api<{ id: string; name: string; email: string; avatarUrl?: string | null; isEmailVerified: boolean }>('/auth/me', {}, true),
   logout: async () => {
     await loadTokens();
     const token = refreshToken;
-    if (token) await fetch(`${API_URL}/auth/logout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken: token }) }).catch(() => undefined);
+    if (token) await fetchWithTimeout(`${API_URL}/auth/logout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken: token }) }).catch(() => undefined);
     await clearTokens();
   },
 };
+
+export async function hasStoredSession() {
+  await loadTokens();
+  return Boolean(accessToken || refreshToken);
+}

@@ -79,6 +79,7 @@ export class UsersService {
     if (!user) throw new NotFoundException('Account not found');
     return {
       id: user.id, name: user.profile?.name ?? user.name, email: user.email,
+      avatarUrl: user.profile?.avatarUrl ?? null,
       isEmailVerified: user.emailVerified ?? user.isEmailVerified, createdAt: user.createdAt,
     };
   }

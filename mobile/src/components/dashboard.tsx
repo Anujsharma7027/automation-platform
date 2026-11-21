@@ -10,6 +10,7 @@ import {
     View,
 } from 'react-native';
 import { Image } from 'expo-image';
+import { router } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AiMark } from '@/components/ai-mark';
@@ -282,7 +283,8 @@ function WorkflowRow({
 }
 
 export function Dashboard() {
-    const { user, signOut } = useAuth();
+    const { user } = useAuth();
+    const [avatarFailed, setAvatarFailed] = useState(false);
     const insets = useSafeAreaInsets();
     const window = useWindowDimensions();
     // Static web rendering has no real window size; use a phone width until hydrated.
@@ -352,11 +354,15 @@ export function Dashboard() {
                                 <AiMark animated={false} size={34} />
                             </Pressable>
                             <Pressable
-                                accessibilityLabel="Sign out"
+                                accessibilityLabel="Open settings"
                                 accessibilityRole="button"
-                                onPress={() => void signOut()}
+                                onPress={() => router.push('/settings')}
                                 style={({ pressed }) => [styles.avatar, pressed && styles.pressed]}>
-                                <Text style={styles.avatarText}>{user?.name?.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || 'U'}</Text>
+                                {user?.avatarUrl && !avatarFailed ? (
+                                    <Image contentFit="cover" onError={() => setAvatarFailed(true)} source={{ uri: user.avatarUrl }} style={styles.avatarImage} transition={200} />
+                                ) : (
+                                    <Text style={styles.avatarText}>{user?.name?.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || 'U'}</Text>
+                                )}
                             </Pressable>
                         </View>
                     </View>
@@ -560,7 +566,13 @@ const styles = StyleSheet.create({
         borderRadius: 22,
         height: 34,
         justifyContent: 'center',
+        overflow: 'hidden',
         position: 'relative',
+        width: 34,
+    },
+    avatarImage: {
+        borderRadius: 17,
+        height: 34,
         width: 34,
     },
     avatarText: {
