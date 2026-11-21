@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Animated,
   BackHandler,
   Easing,
@@ -21,6 +22,9 @@ import Svg, { Circle, Defs, LinearGradient, Path, Pattern, Rect, Stop } from 're
 import { AiChatDrawer } from '@/components/ai-chat-drawer';
 import { AiMark } from '@/components/ai-mark';
 import { IconifyIcon } from '@/components/iconify-icon';
+import { ConnectedAccount, connectionsApi } from '@/auth/auth-api';
+import * as Linking from 'expo-linking';
+import * as WebBrowser from 'expo-web-browser';
 
 const NODE_W = 96;
 const NODE_H = 90;
@@ -440,28 +444,179 @@ function AppConfigDrawer({
         <Pressable accessibilityRole="button" accessibilityLabel="Choose trigger event" onPress={() => setEventsOpen((open) => !open)} style={styles.eventSelect}><Text style={[styles.eventSelectText, !event && styles.eventSelectPlaceholder]}>{event || 'Select an event'}</Text><IconifyIcon color="#747771" name={eventsOpen ? 'lucide:chevron-up' : 'lucide:chevron-down'} size={17} /></Pressable>
         {eventsOpen ? <View style={styles.eventOptions}>{options.map((option) => <Pressable key={option} accessibilityRole="radio" accessibilityState={{ selected: event === option }} onPress={() => { onEvent(option); setEventsOpen(false); }} style={[styles.eventOption, event === option && styles.eventOptionSelected]}><View style={[styles.radioOuter, event === option && styles.radioOuterSelected]}>{event === option ? <View style={styles.radioInner} /> : null}</View><Text style={styles.eventText}>{option}</Text></Pressable>)}</View> : <View style={{ marginBottom: 20 }} />}
         <Text style={styles.configLabel}>ACCOUNT</Text>
-        <View style={styles.accountCard}><View style={{ flex: 1 }}><Text style={styles.accountTitle}>Connect {selectedApp.label}</Text><Text style={styles.configHint}>Choose an account to use with this workflow.</Text></View><Pressable onPress={() => setAccountMessage(`${selectedApp.label} sign in will be implemented later.`)} style={styles.signInButton}><Text style={styles.signInText}>Sign in</Text></Pressable></View>
-        <Text style={styles.accountNote}>{accountMessage || 'Account connection will be available soon.'}</Text>
+        {selectedApp.id === 'gmail' ? <GmailAccountPanel /> : <>
+          <View style={styles.accountCard}>
+            <View style={{ flex: 1 }}><Text style={styles.accountTitle}>Connect {selectedApp.label}</Text><Text style={styles.configHint}>Choose an account to use with this workflow.</Text></View>
+            <Pressable onPress={() => setAccountMessage(`${selectedApp.label} sign in will be implemented later.`)} style={styles.signInButton}><Text style={styles.signInText}>Sign in</Text></Pressable>
+          </View>
+          <Text style={styles.accountNote}>{accountMessage || 'Account connection will be available soon.'}</Text>
+        </>}
       </ScrollView> : <View style={[styles.configContent, { flex: 1 }]}><Text style={styles.configHint}>Test your {selectedApp.label} trigger after setup is complete.</Text></View>}
       <View style={styles.configFooter}><Pressable disabled={!event || tab !== 'Setup'} style={[styles.continueButton, (!event || tab !== 'Setup') && styles.continueDisabled]}><Text style={styles.continueText}>Continue</Text><IconifyIcon color="#FFFFFF" name="lucide:arrow-right" size={17} /></Pressable></View>
     </Animated.View>
   </View>;
 }
 
-export function WorkflowCanvas() {
+function GmailAccountPanel() {
+  const [accounts, setAccounts] = useState<ConnectedAccount[]>([]);
+  const [loading, setLoading] = useState(Platform.OS !== 'web');
+  const [connecting, setConnecting] = useState(false);
+  const [actionId, setActionId] = useState<string | null>(null);
+  const [message, setMessage] = useState('');
+  const [messageError, setMessageError] = useState(false);
+
+  const loadAccounts = useCallback(async (): Promise<boolean> => {
+    try {
+      setAccounts(await connectionsApi.list('gmail'));
+      return true;
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Could not load Gmail connections.');
+      setMessageError(true);
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    let active = true;
+    void connectionsApi.list('gmail').then((result) => {
+      if (active) setAccounts(result);
+    }).catch((error: unknown) => {
+      if (active) {
+        setMessage(error instanceof Error ? error.message : 'Could not load Gmail connections.');
+        setMessageError(true);
+      }
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, []);
+
+  const connect = async () => {
+    if (connecting) return;
+    setConnecting(true);
+    setMessage('');
+    setMessageError(false);
+    try {
+      const flow = await connectionsApi.beginGmailConnect();
+      setMessage(accounts.some((account) => account.status !== 'CONNECTED') ? 'Reconnecting Gmail account…' : 'Waiting for Google authorization…');
+      const result = await WebBrowser.openAuthSessionAsync(flow.authorizationUrl, flow.callbackUrl);
+      if (result.type === 'cancel' || result.type === 'dismiss') {
+        setMessage('Gmail authorization was cancelled. You can try again.');
+        return;
+      }
+      if (result.type !== 'success' || !result.url) {
+        throw new Error('Google authorization did not return to Taskvyn. Please try again.');
+      }
+      const callbackStatus = Linking.parse(result.url).queryParams?.status;
+      const status = typeof callbackStatus === 'string' ? callbackStatus : undefined;
+      if (status !== 'connected') {
+        if (status === 'cancelled') {
+          setMessage('Gmail authorization was cancelled. You can try again.');
+          return;
+        }
+        throw new Error('Gmail could not be connected. Check the setup and try again.');
+      }
+      if (await loadAccounts()) setMessage('Gmail account connected.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Gmail could not be connected. Please try again.');
+      setMessageError(true);
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const refresh = async (account: ConnectedAccount) => {
+    setActionId(account.id);
+    setMessage('');
+    setMessageError(false);
+    try {
+      await connectionsApi.refresh(account.id);
+      if (await loadAccounts()) setMessage('Gmail connection checked.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Gmail connection could not be checked.');
+      setMessageError(true);
+    } finally {
+      setActionId(null);
+    }
+  };
+
+  const disconnect = async (account: ConnectedAccount) => {
+    setActionId(account.id);
+    setMessage('');
+    setMessageError(false);
+    try {
+      const result = await connectionsApi.disconnect(account.id);
+      setAccounts((current) => current.filter((item) => item.id !== account.id));
+      setMessage(result.providerRevoked ? 'Gmail account disconnected.' : 'Gmail account disconnected from Taskvyn. Google revocation could not be confirmed.');
+      setMessageError(!result.providerRevoked);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Gmail account could not be disconnected.');
+      setMessageError(true);
+    } finally {
+      setActionId(null);
+    }
+  };
+
+  const statusLabel = (account: ConnectedAccount) => {
+    switch (account.status) {
+      case 'CONNECTED': return 'Connected';
+      case 'EXPIRED': return 'Connection expired';
+      case 'REVOKED': return 'Authorization revoked';
+      case 'CONNECTING': return 'Waiting for authorization';
+      default: return 'Connection needs attention';
+    }
+  };
+
+  if (Platform.OS === 'web') return <Text style={styles.accountNote}>Connect Gmail from the Taskvyn Android or iOS app.</Text>;
+
+  return <View>
+    {loading ? <View style={styles.accountLoading}><ActivityIndicator color="#555850" size="small" /><Text style={styles.accountNote}>Checking connected Gmail accounts…</Text></View> : null}
+    {!loading && accounts.length === 0 ? <View style={styles.accountCard}><View style={{ flex: 1 }}><Text style={styles.accountTitle}>Connect Gmail</Text><Text style={styles.configHint}>Choose a Gmail account for this workflow.</Text></View></View> : null}
+    {accounts.map((account) => <View key={account.id} style={styles.connectedAccountCard}>
+      <View style={styles.connectedAccountHeader}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.accountTitle}>Connected Account</Text>
+          {account.displayName ? <Text style={styles.connectedAccountName}>{account.displayName}</Text> : null}
+          <Text selectable style={styles.connectedAccountEmail}>{account.accountEmail}</Text>
+          <Text style={[styles.connectedAccountStatus, account.status !== 'CONNECTED' && styles.connectionStatusWarning]}>{statusLabel(account)}</Text>
+        </View>
+        <IconifyIcon color={account.status === 'CONNECTED' ? '#21825B' : '#BA7112'} name={account.status === 'CONNECTED' ? 'lucide:circle-check' : 'lucide:circle-alert'} size={19} />
+      </View>
+      <View style={styles.connectionActions}>
+        <Pressable accessibilityRole="button" disabled={actionId === account.id || connecting} onPress={() => void refresh(account)} style={styles.connectionActionButton}>
+          <Text style={styles.connectionActionText}>{actionId === account.id ? 'Checking…' : 'Check connection'}</Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" disabled={actionId === account.id || connecting} onPress={() => void disconnect(account)} style={styles.connectionActionButton}>
+          <Text style={[styles.connectionActionText, styles.disconnectText]}>{actionId === account.id ? 'Working…' : 'Disconnect'}</Text>
+        </Pressable>
+      </View>
+    </View>)}
+    <Pressable accessibilityRole="button" disabled={connecting || loading || actionId !== null} onPress={() => void connect()} style={[styles.connectAccountButton, (connecting || loading || actionId !== null) && styles.connectAccountDisabled]}>
+      {connecting ? <ActivityIndicator color="#FFFFFF" size="small" /> : <IconifyIcon color="#FFFFFF" name="lucide:plus" size={16} />}
+      <Text style={styles.connectAccountText}>{connecting ? accounts.some((account) => account.status !== 'CONNECTED') ? 'Reconnecting…' : 'Connecting to Google…' : accounts.length ? 'Change Account' : 'Connect Account'}</Text>
+    </Pressable>
+    {connecting ? <Text style={styles.accountNote}>Waiting for authorization in Google’s secure sign-in page.</Text> : null}
+    {message ? <Text accessibilityRole="alert" style={[styles.connectionMessage, messageError && styles.connectionMessageError]}>{message}</Text> : null}
+  </View>;
+}
+
+export function WorkflowCanvas({ showGmailConnection = false }: { showGmailConnection?: boolean } = {}) {
   const [nodes, setNodes] = useState<FlowNode[]>([]);
   const [history, setHistory] = useState<FlowNode[][]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const header = useHeaderMetrics();
   const [target, setTarget] = useState<DrawerTarget | null>(null);
-  const [configApp, setConfigApp] = useState<AppDef | null>(null);
+  const [configApp, setConfigApp] = useState<AppDef | null>(() => showGmailConnection ? app('gmail') : null);
   const [editingConfigNode, setEditingConfigNode] = useState<string | null>(null);
   const [triggerEvent, setTriggerEvent] = useState('');
   const [configTab, setConfigTab] = useState<'Setup' | 'Test'>('Setup');
   const [running, setRunning] = useState(false);
   const [view, setView] = useState({ w: 390, h: 640 });
   const drawerAnim = useRef(new Animated.Value(0)).current;
-  const [configAnim] = useState(() => new Animated.Value(0));
+  const [configAnim] = useState(() => new Animated.Value(showGmailConnection ? 1 : 0));
   const [aiOpen, setAiOpen] = useState(false);
 
   const { pos, width, height } = useMemo(() => layout(nodes), [nodes]);
@@ -1680,6 +1835,22 @@ drawer: {
   radioInner: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#242528' },
   eventText: { fontSize: 13, color: '#292A2C', fontWeight: '500' },
   accountCard: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 13, borderWidth: 1, borderColor: '#E8E9E6', borderRadius: 13 },
+  connectedAccountCard: { padding: 13, borderWidth: 1, borderColor: '#DDE8E1', borderRadius: 13, backgroundColor: '#FBFDFC', marginBottom: 12 },
+  connectedAccountHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  connectedAccountName: { color: '#343630', fontSize: 12, fontWeight: '600', marginBottom: 2 },
+  connectedAccountEmail: { color: '#4E514B', fontSize: 12, marginBottom: 4 },
+  connectedAccountStatus: { color: '#21825B', fontSize: 11, fontWeight: '600' },
+  connectionStatusWarning: { color: '#A86510' },
+  connectionActions: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  connectionActionButton: { paddingVertical: 7, paddingHorizontal: 10, borderRadius: 8, backgroundColor: '#F1F2F0' },
+  connectionActionText: { color: '#292A2C', fontSize: 11, fontWeight: '700' },
+  disconnectText: { color: '#AB3333' },
+  connectAccountButton: { minHeight: 44, marginTop: 10, borderRadius: 11, paddingHorizontal: 14, backgroundColor: '#1C1D1F', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  connectAccountDisabled: { opacity: 0.62 },
+  connectAccountText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
+  accountLoading: { minHeight: 42, flexDirection: 'row', alignItems: 'center', gap: 9 },
+  connectionMessage: { color: '#21825B', fontSize: 11, lineHeight: 16, marginTop: 8 },
+  connectionMessageError: { color: '#B42318' },
   accountTitle: { fontSize: 13, fontWeight: '700', color: '#242528', marginBottom: 3 },
   signInButton: { paddingVertical: 8, paddingHorizontal: 13, borderRadius: 9, backgroundColor: '#F1F2F0' },
   signInText: { color: '#292A2C', fontSize: 12, fontWeight: '700' },

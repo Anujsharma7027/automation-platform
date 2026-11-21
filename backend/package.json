@@ -13,6 +13,8 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
+    "migrate:connections": "node --env-file=.env -r ts-node/register scripts/migrate-connections.ts",
+    "rotate:connection-keys": "node --env-file=.env -r ts-node/register scripts/rotate-connection-keys.ts",
     "lint": "oxlint --type-aware src/ test/",
     "test": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js",
     "test:watch": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --watch",

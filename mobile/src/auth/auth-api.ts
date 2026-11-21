@@ -112,3 +112,31 @@ export const authApi = {
     await clearTokens();
   },
 };
+
+export type ConnectionStatus = 'CONNECTING' | 'CONNECTED' | 'EXPIRED' | 'REVOKED' | 'ERROR';
+export type ConnectedAccount = {
+  id: string;
+  provider: 'gmail';
+  accountEmail: string;
+  displayName?: string;
+  grantedScopes: string[];
+  status: ConnectionStatus;
+  accessTokenExpiresAt: string;
+  lastValidatedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export const connectionsApi = {
+  beginGmailConnect: () => api<{ authorizationUrl: string; callbackUrl: string; expiresAt: string }>(
+    '/connections/gmail/connect', { method: 'POST' }, true,
+  ),
+  list: (provider?: 'gmail') => api<ConnectedAccount[]>(
+    `/connections${provider ? `?provider=${provider}` : ''}`, {}, true,
+  ),
+  get: (id: string) => api<ConnectedAccount>(`/connections/${encodeURIComponent(id)}`, {}, true),
+  refresh: (id: string) => api<ConnectedAccount>(`/connections/${encodeURIComponent(id)}/refresh`, { method: 'POST' }, true),
+  disconnect: (id: string) => api<{ id: string; disconnected: true; providerRevoked: boolean }>(
+    `/connections/${encodeURIComponent(id)}`, { method: 'DELETE' }, true,
+  ),
+};
