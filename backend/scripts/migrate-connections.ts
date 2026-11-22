@@ -2,6 +2,8 @@ import 'reflect-metadata';
 import mongoose from 'mongoose';
 import { ConnectedAccount, ConnectedAccountSchema } from '../src/connections/schemas/connected-account.schema';
 import { OAuthState, OAuthStateSchema } from '../src/connections/schemas/oauth-state.schema';
+import { Workflow, WorkflowSchema } from '../src/workflows/schemas/workflow.schema';
+import { WorkflowRun, WorkflowRunSchema } from '../src/workflows/schemas/workflow-run.schema';
 
 async function main() {
   const uri = process.env.MONGODB_URI?.trim();
@@ -12,6 +14,8 @@ async function main() {
     const oauthStates = connection.model(OAuthState.name, OAuthStateSchema);
     await connectedAccounts.createIndexes();
     await oauthStates.createIndexes();
+    await connection.model(Workflow.name, WorkflowSchema).createIndexes();
+    await connection.model(WorkflowRun.name, WorkflowRunSchema).createIndexes();
   } finally {
     await connection.close();
   }

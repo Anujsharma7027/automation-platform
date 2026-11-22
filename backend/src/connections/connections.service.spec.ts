@@ -1,6 +1,7 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Model, Types } from 'mongoose';
+import { AppRegistry } from '../engine/core/app-registry';
 import { ConnectionsService } from './connections.service';
 import { ProviderRegistry } from './provider-registry';
 import { ConnectedAccount } from './schemas/connected-account.schema';
@@ -41,8 +42,14 @@ function connection(overrides: Record<string, unknown> = {}) {
   };
 }
 
+const GMAIL_READ = 'https://www.googleapis.com/auth/gmail.readonly';
+const registry = new AppRegistry([{
+  key: 'gmail', name: 'Gmail', description: '', icon: '', category: '', triggers: [], actions: [],
+  auth: { type: 'oauth2', provider: 'google', scopes: [GMAIL_READ] },
+}]);
+
 function createHarness() {
-  const stateRecord = { userId: new Types.ObjectId(USER_ID) };
+  const stateRecord = { userId: new Types.ObjectId(USER_ID), apps: ['gmail'] };
   const stateModel = {
     create: jest.fn().mockResolvedValue(undefined),
     findOneAndDelete: jest.fn(() => query(stateRecord)),
@@ -55,9 +62,12 @@ function createHarness() {
     deleteOne: jest.fn(() => query({ deletedCount: 1 })),
   };
   const provider = {
-    id: 'gmail',
-    name: 'Gmail',
-    scopes: ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/gmail.readonly'],
+    id: 'google',
+    name: 'Google',
+    aliases: ['gmail'],
+    identityScopes: ['openid', 'email', 'profile'],
+    isInvalidGrant: (error: unknown) => (error as { response?: { data?: { error?: string } } })?.response?.data?.error === 'invalid_grant',
+    isUnauthorized: () => false,
     createAuthorizationUrl: jest.fn().mockReturnValue('https://accounts.google.test/authorize'),
     exchangeCode: jest.fn().mockResolvedValue({
       accessToken: 'access-token-fixture', refreshToken: 'refresh-token-fixture',
@@ -80,9 +90,10 @@ function createHarness() {
   const service = new ConnectionsService(
     connectionModel as unknown as Model<ConnectedAccount>,
     stateModel as unknown as Model<OAuthState>,
-    { get: jest.fn().mockReturnValue(provider) } as unknown as ProviderRegistry,
+    { get: jest.fn().mockReturnValue(provider), storedIds: jest.fn().mockReturnValue(['google', 'gmail']) } as unknown as ProviderRegistry,
     encryption as unknown as TokenEncryptionService,
     config as unknown as ConfigService,
+    registry,
   );
   return { service, stateModel, connectionModel, provider, encryption };
 }
@@ -90,7 +101,7 @@ function createHarness() {
 describe('ConnectionsService', () => {
   it('creates a hashed, short-lived user-bound Gmail OAuth state', async () => {
     const { service, stateModel, provider } = createHarness();
-    const flow = await service.beginGmailConnect(USER_ID);
+    const flow = await service.beginConnect(USER_ID, 'gmail');
     expect(flow).toMatchObject({
       authorizationUrl: 'https://accounts.google.test/authorize',
       callbackUrl: 'mobile://oauth/gmail',
@@ -100,15 +111,15 @@ describe('ConnectionsService', () => {
     expect(state.stateHash).toMatch(/^[a-f\d]{64}$/);
     expect(state.stateHash).not.toBe(STATE);
     expect(state.expiresAt.getTime()).toBeGreaterThan(Date.now());
-    expect(provider.createAuthorizationUrl).toHaveBeenCalledWith(expect.stringMatching(/^[a-f\d]{64}$/));
+    expect(provider.createAuthorizationUrl).toHaveBeenCalledWith(expect.stringMatching(/^[a-f\d]{64}$/), [GMAIL_READ]);
   });
 
   it('rejects invalid, expired, or replayed state without exchanging a code', async () => {
     const { service, stateModel, provider } = createHarness();
     stateModel.findOneAndDelete.mockImplementation(() => query(null));
-    await expect(service.handleGmailCallback({ code: 'code-fixture', state: 'bad-state' }))
+    await expect(service.handleCallback('google', { code: 'code-fixture', state: 'bad-state' }))
       .resolves.toContain('status=failed');
-    await expect(service.handleGmailCallback({ code: 'code-fixture', state: STATE }))
+    await expect(service.handleCallback('google', { code: 'code-fixture', state: STATE }))
       .resolves.toContain('status=failed');
     expect(stateModel.findOneAndDelete.mock.calls[0][0].expiresAt.$gt).toBeInstanceOf(Date);
     expect(provider.exchangeCode).not.toHaveBeenCalled();
@@ -116,15 +127,15 @@ describe('ConnectionsService', () => {
 
   it('saves a connected account and redirects with only safe connection metadata', async () => {
     const { service, connectionModel, provider } = createHarness();
-    const redirect = await service.handleGmailCallback({ code: 'authorization-code-fixture', state: STATE });
+    const redirect = await service.handleCallback('google', { code: 'authorization-code-fixture', state: STATE });
     expect(redirect).toContain('status=connected');
     expect(redirect).toContain(`connectionId=${CONNECTION_ID}`);
     expect(redirect).not.toContain('access-token-fixture');
     expect(redirect).not.toContain('refresh-token-fixture');
     expect(provider.exchangeCode).toHaveBeenCalledWith('authorization-code-fixture');
     expect(connectionModel.findOneAndUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: expect.any(Types.ObjectId), provider: 'gmail', externalAccountId: 'google-sub-fixture' }),
-      expect.objectContaining({ $set: expect.objectContaining({ status: 'CONNECTED' }) }),
+      expect.objectContaining({ userId: expect.any(Types.ObjectId), provider: 'google', externalAccountId: 'google-sub-fixture' }),
+      expect.objectContaining({ $set: expect.objectContaining({ status: 'CONNECTED', provider: 'google' }) }),
       expect.objectContaining({ upsert: true, new: true }),
     );
     expect(connectionModel.findOneAndUpdate.mock.calls[0][1].$set.encryptedAccessToken).toMatch(/^enc:/);
@@ -136,9 +147,9 @@ describe('ConnectionsService', () => {
     connectionModel.findOne.mockImplementation(() => query(connection()));
     provider.exchangeCode.mockResolvedValueOnce({
       accessToken: 'new-access-token-fixture', refreshToken: null,
-      expiresAt: new Date(Date.now() + 3_600_000), scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+      expiresAt: new Date(Date.now() + 3_600_000), scopes: [GMAIL_READ],
     });
-    await service.handleGmailCallback({ code: 'authorization-code-fixture', state: STATE });
+    await service.handleCallback('google', { code: 'authorization-code-fixture', state: STATE });
     expect(connectionModel.findOneAndUpdate.mock.calls[0][1].$set.encryptedRefreshToken).toBeUndefined();
     expect(connectionModel.findOneAndUpdate.mock.calls[0][1].$set.encryptedAccessToken).toBe('enc:new-access-token-fixture');
   });
@@ -149,8 +160,18 @@ describe('ConnectionsService', () => {
       accessToken: 'access-token-fixture', refreshToken: null,
       expiresAt: new Date(Date.now() + 3_600_000), scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
     });
-    await expect(service.handleGmailCallback({ code: 'authorization-code-fixture', state: STATE }))
+    await expect(service.handleCallback('google', { code: 'authorization-code-fixture', state: STATE }))
       .resolves.toContain('status=failed');
+    expect(connectionModel.findOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('rejects a grant that is missing the requested app permissions', async () => {
+    const { service, provider, connectionModel } = createHarness();
+    provider.exchangeCode.mockResolvedValueOnce({
+      accessToken: 'access-token-fixture', refreshToken: 'refresh-token-fixture',
+      expiresAt: new Date(Date.now() + 3_600_000), scopes: ['openid', 'email'],
+    });
+    await expect(service.handleCallback('google', { code: 'code', state: STATE })).resolves.toContain('status=missing_permissions');
     expect(connectionModel.findOneAndUpdate).not.toHaveBeenCalled();
   });
 
@@ -160,7 +181,7 @@ describe('ConnectionsService', () => {
     const result = await service.refresh(USER_ID, CONNECTION_ID);
     expect(provider.getAccount).toHaveBeenCalledTimes(1);
     expect(provider.refreshAccessToken).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ provider: 'gmail', accountEmail: 'gmail@example.test', status: 'CONNECTED' });
+    expect(result).toMatchObject({ provider: 'google', authorizedApps: ['gmail'], accountEmail: 'gmail@example.test', status: 'CONNECTED' });
     expect(result).not.toHaveProperty('encryptedAccessToken');
     expect(result).not.toHaveProperty('encryptedRefreshToken');
     expect(result).not.toHaveProperty('accessToken');

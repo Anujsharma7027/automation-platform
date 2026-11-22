@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
   Animated,
   BackHandler,
   Easing,
@@ -22,9 +21,8 @@ import Svg, { Circle, Defs, LinearGradient, Path, Pattern, Rect, Stop } from 're
 import { AiChatDrawer } from '@/components/ai-chat-drawer';
 import { AiMark } from '@/components/ai-mark';
 import { IconifyIcon } from '@/components/iconify-icon';
-import { ConnectedAccount, connectionsApi } from '@/auth/auth-api';
-import * as Linking from 'expo-linking';
-import * as WebBrowser from 'expo-web-browser';
+import { Workflow, workflowsApi, WorkflowStepConfig } from '@/auth/auth-api';
+import { MappingSource, StepConfigDrawer, StepDraft } from '@/components/automation/step-config-drawer';
 
 const NODE_W = 96;
 const NODE_H = 90;
@@ -100,6 +98,8 @@ type AppDef = {
   bg: string;
   accent: string;
   category: string;
+  /** Tint for single-colour icons. */
+  iconColor?: string;
 };
 
 type FlowNode = AppDef & { key: string; parent: string | null };
@@ -112,13 +112,15 @@ const APPS: AppDef[] = [
   { id: 'webhooks', label: 'Webhooks', subtitle: 'Catch a hook', icon: 'logos:webhooks', bg: '#FCE9EF', accent: '#E9497A', category: 'Developer' },
   { id: 'slack', label: 'Slack', subtitle: 'Send a message', icon: 'logos:slack-icon', bg: '#E6F5FA', accent: '#36C5F0', category: 'Communication' },
   { id: 'openai', label: 'ChatGPT', subtitle: 'Generate text', icon: 'logos:openai-icon', bg: '#F3F3F1', accent: '#10A37F', category: 'AI' },
-  { id: 'drive', label: 'Google Drive', subtitle: 'Upload a file', icon: 'logos:google-drive-2020', bg: '#E9F6EE', accent: '#1FA463', category: 'Storage' },
+  { id: 'google_drive', label: 'Google Drive', subtitle: 'Upload a file', icon: 'logos:google-drive-2020', bg: '#E9F6EE', accent: '#1FA463', category: 'Storage' },
   { id: 'discord', label: 'Discord', subtitle: 'Get a message', icon: 'logos:discord-icon', bg: '#ECEEFF', accent: '#5865F2', category: 'Communication' },
   { id: 'notion', label: 'Notion', subtitle: 'Create a page', icon: 'logos:notion-icon', bg: '#F1F1EF', accent: '#2F2F2F', category: 'Productivity' },
   { id: 'airtable', label: 'Airtable', subtitle: 'Create a record', icon: 'logos:airtable', bg: '#FFF4E2', accent: '#FCB400', category: 'Productivity' },
   { id: 'github', label: 'GitHub', subtitle: 'New issue', icon: 'logos:github-icon', bg: '#EFF0F2', accent: '#24292F', category: 'Developer' },
   { id: 'gmail', label: 'Gmail', subtitle: 'Send an email', icon: 'logos:google-gmail', bg: '#FDECEA', accent: '#EA4335', category: 'Communication' },
-  { id: 'calendar', label: 'Google Calendar', subtitle: 'Create event', icon: 'logos:google-calendar', bg: '#E8F0FE', accent: '#4285F4', category: 'Productivity' },
+  { id: 'google_sheets', label: 'Google Sheets', subtitle: 'Add a row', icon: 'simple-icons:googlesheets', iconColor: '#0F9D58', bg: '#E6F4EA', accent: '#0F9D58', category: 'Productivity' },
+  { id: 'google_forms', label: 'Google Forms', subtitle: 'New response', icon: 'simple-icons:googleforms', iconColor: '#7248B9', bg: '#F1EBFA', accent: '#7248B9', category: 'Productivity' },
+  { id: 'google_calendar', label: 'Google Calendar', subtitle: 'Create event', icon: 'logos:google-calendar', bg: '#E8F0FE', accent: '#4285F4', category: 'Productivity' },
   { id: 'teams', label: 'Microsoft Teams', subtitle: 'Post a message', icon: 'logos:microsoft-teams', bg: '#EEEDFB', accent: '#5059C9', category: 'Communication' },
   { id: 'asana', label: 'Asana', subtitle: 'Create a task', icon: 'logos:asana-icon', bg: '#FDEDEE', accent: '#F06A6A', category: 'Productivity' },
   { id: 'trello', label: 'Trello', subtitle: 'Create a card', icon: 'logos:trello', bg: '#E6F0FB', accent: '#0079BF', category: 'Productivity' },
@@ -139,7 +141,7 @@ const INITIAL: FlowNode[] = [
   { ...app('webhooks'), subtitle: 'Webhook response', key: 'n1', parent: null },
   { ...app('slack'), subtitle: 'Get a user', key: 'n2', parent: 'n1' },
   { ...app('openai'), subtitle: 'Edit an image', key: 'n3', parent: 'n2' },
-  { ...app('drive'), key: 'n4', parent: 'n1' },
+  { ...app('google_drive'), key: 'n4', parent: 'n1' },
   { ...app('webhooks'), subtitle: 'Webhook response', key: 'n5', parent: 'n4' },
   { ...app('discord'), key: 'n6', parent: 'n4' },
 ];
@@ -387,7 +389,7 @@ function Drawer({
               onPress={() => onPick(a)}
               style={({ pressed }) => [styles.appTile, pressed && { transform: [{ scale: 0.96 }] }]}>
               <View style={[styles.appIcon, { backgroundColor: a.bg }]}>
-                <IconifyIcon name={a.icon} size={26} />
+                <IconifyIcon color={a.iconColor} name={a.icon} size={26} />
               </View>
               <Text numberOfLines={1} style={styles.appName}>
                 {a.label}
@@ -404,219 +406,24 @@ function Drawer({
   );
 }
 
-const TRIGGER_EVENTS: Record<string, string[]> = {
-  gmail: ['New Email', 'New Email Matching Search', 'New Attachment'],
-  slack: ['New Message', 'New Mention'], drive: ['New File', 'New File in Folder'],
-  discord: ['New Message'], notion: ['New Database Item', 'New Page'],
-  webhooks: ['Catch a Webhook'],
-};
-
-function AppConfigDrawer({
-  app: selectedApp, event, onEvent, tab, onTab, anim, onClose, onChange,
-}: {
-  app: AppDef; event: string; onEvent: (event: string) => void;
-  tab: 'Setup' | 'Test'; onTab: (tab: 'Setup' | 'Test') => void;
-  anim: Animated.Value; onClose: () => void; onChange: () => void;
-}) {
-  const insets = useSafeAreaInsets();
-  const { height } = useWindowDimensions();
-  const [accountMessage, setAccountMessage] = useState('');
-  const [eventsOpen, setEventsOpen] = useState(false);
-  const options = TRIGGER_EVENTS[selectedApp.id] ?? [`New ${selectedApp.label} Event`];
-  const translateY = anim.interpolate({ inputRange: [0, 1], outputRange: [height, 0] });
-  const scrimOpacity = anim.interpolate({ inputRange: [0, 1], outputRange: [0, 0.42] });
-  return <View style={styles.drawerLayer}>
-    <Animated.View style={[styles.scrim, { opacity: scrimOpacity }]}><Pressable accessibilityLabel="Close configuration" onPress={onClose} style={{ flex: 1 }} /></Animated.View>
-    <Animated.View style={[styles.configDrawer, { paddingBottom: Math.max(insets.bottom, 16), transform: [{ translateY }] }]}>
-      <View style={styles.configHeader}>
-        <View style={[styles.configIcon, { backgroundColor: selectedApp.bg }]}><IconifyIcon name={selectedApp.icon} size={24} /></View>
-        <View style={{ flex: 1 }}><Text style={styles.configEyebrow}>STEP 1 · TRIGGER</Text><Text style={styles.configTitle}>Select the event</Text></View>
-        <Pressable accessibilityLabel="Close configuration" onPress={onClose} style={styles.closeBtn}><IconifyIcon color="#1B1C1E" name="lucide:x" size={20} /></Pressable>
-      </View>
-      <View style={styles.configTabs}>
-        {(['Setup', 'Test'] as const).map((item) => <Pressable key={item} onPress={() => onTab(item)} style={[styles.configTab, tab === item && styles.configTabActive]}><Text style={[styles.configTabText, tab === item && styles.configTabTextActive]}>{item}</Text></Pressable>)}
-      </View>
-      {tab === 'Setup' ? <ScrollView contentContainerStyle={styles.configContent} keyboardShouldPersistTaps="handled">
-        <Text style={styles.configLabel}>APP</Text>
-        <View style={styles.configAppRow}><View style={[styles.configSmallIcon, { backgroundColor: selectedApp.bg }]}><IconifyIcon name={selectedApp.icon} size={20} /></View><Text style={styles.configAppName}>{selectedApp.label}</Text><Pressable onPress={onChange}><Text style={styles.changeText}>Change</Text></Pressable></View>
-        <Text style={styles.configLabel}>TRIGGER EVENT <Text style={styles.required}>*</Text></Text>
-        <Text style={styles.configHint}>Choose what starts this workflow.</Text>
-        <Pressable accessibilityRole="button" accessibilityLabel="Choose trigger event" onPress={() => setEventsOpen((open) => !open)} style={styles.eventSelect}><Text style={[styles.eventSelectText, !event && styles.eventSelectPlaceholder]}>{event || 'Select an event'}</Text><IconifyIcon color="#747771" name={eventsOpen ? 'lucide:chevron-up' : 'lucide:chevron-down'} size={17} /></Pressable>
-        {eventsOpen ? <View style={styles.eventOptions}>{options.map((option) => <Pressable key={option} accessibilityRole="radio" accessibilityState={{ selected: event === option }} onPress={() => { onEvent(option); setEventsOpen(false); }} style={[styles.eventOption, event === option && styles.eventOptionSelected]}><View style={[styles.radioOuter, event === option && styles.radioOuterSelected]}>{event === option ? <View style={styles.radioInner} /> : null}</View><Text style={styles.eventText}>{option}</Text></Pressable>)}</View> : <View style={{ marginBottom: 20 }} />}
-        <Text style={styles.configLabel}>ACCOUNT</Text>
-        {selectedApp.id === 'gmail' ? <GmailAccountPanel /> : <>
-          <View style={styles.accountCard}>
-            <View style={{ flex: 1 }}><Text style={styles.accountTitle}>Connect {selectedApp.label}</Text><Text style={styles.configHint}>Choose an account to use with this workflow.</Text></View>
-            <Pressable onPress={() => setAccountMessage(`${selectedApp.label} sign in will be implemented later.`)} style={styles.signInButton}><Text style={styles.signInText}>Sign in</Text></Pressable>
-          </View>
-          <Text style={styles.accountNote}>{accountMessage || 'Account connection will be available soon.'}</Text>
-        </>}
-      </ScrollView> : <View style={[styles.configContent, { flex: 1 }]}><Text style={styles.configHint}>Test your {selectedApp.label} trigger after setup is complete.</Text></View>}
-      <View style={styles.configFooter}><Pressable disabled={!event || tab !== 'Setup'} style={[styles.continueButton, (!event || tab !== 'Setup') && styles.continueDisabled]}><Text style={styles.continueText}>Continue</Text><IconifyIcon color="#FFFFFF" name="lucide:arrow-right" size={17} /></Pressable></View>
-    </Animated.View>
-  </View>;
-}
-
-function GmailAccountPanel() {
-  const [accounts, setAccounts] = useState<ConnectedAccount[]>([]);
-  const [loading, setLoading] = useState(Platform.OS !== 'web');
-  const [connecting, setConnecting] = useState(false);
-  const [actionId, setActionId] = useState<string | null>(null);
-  const [message, setMessage] = useState('');
-  const [messageError, setMessageError] = useState(false);
-
-  const loadAccounts = useCallback(async (): Promise<boolean> => {
-    try {
-      setAccounts(await connectionsApi.list('gmail'));
-      return true;
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Could not load Gmail connections.');
-      setMessageError(true);
-      return false;
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (Platform.OS === 'web') return;
-    let active = true;
-    void connectionsApi.list('gmail').then((result) => {
-      if (active) setAccounts(result);
-    }).catch((error: unknown) => {
-      if (active) {
-        setMessage(error instanceof Error ? error.message : 'Could not load Gmail connections.');
-        setMessageError(true);
-      }
-    }).finally(() => {
-      if (active) setLoading(false);
-    });
-    return () => { active = false; };
-  }, []);
-
-  const connect = async () => {
-    if (connecting) return;
-    setConnecting(true);
-    setMessage('');
-    setMessageError(false);
-    try {
-      const flow = await connectionsApi.beginGmailConnect();
-      setMessage(accounts.some((account) => account.status !== 'CONNECTED') ? 'Reconnecting Gmail account…' : 'Waiting for Google authorization…');
-      const result = await WebBrowser.openAuthSessionAsync(flow.authorizationUrl, flow.callbackUrl);
-      if (result.type === 'cancel' || result.type === 'dismiss') {
-        setMessage('Gmail authorization was cancelled. You can try again.');
-        return;
-      }
-      if (result.type !== 'success' || !result.url) {
-        throw new Error('Google authorization did not return to Taskvyn. Please try again.');
-      }
-      const callbackStatus = Linking.parse(result.url).queryParams?.status;
-      const status = typeof callbackStatus === 'string' ? callbackStatus : undefined;
-      if (status !== 'connected') {
-        if (status === 'cancelled') {
-          setMessage('Gmail authorization was cancelled. You can try again.');
-          return;
-        }
-        throw new Error('Gmail could not be connected. Check the setup and try again.');
-      }
-      if (await loadAccounts()) setMessage('Gmail account connected.');
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Gmail could not be connected. Please try again.');
-      setMessageError(true);
-    } finally {
-      setConnecting(false);
-    }
-  };
-
-  const refresh = async (account: ConnectedAccount) => {
-    setActionId(account.id);
-    setMessage('');
-    setMessageError(false);
-    try {
-      await connectionsApi.refresh(account.id);
-      if (await loadAccounts()) setMessage('Gmail connection checked.');
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Gmail connection could not be checked.');
-      setMessageError(true);
-    } finally {
-      setActionId(null);
-    }
-  };
-
-  const disconnect = async (account: ConnectedAccount) => {
-    setActionId(account.id);
-    setMessage('');
-    setMessageError(false);
-    try {
-      const result = await connectionsApi.disconnect(account.id);
-      setAccounts((current) => current.filter((item) => item.id !== account.id));
-      setMessage(result.providerRevoked ? 'Gmail account disconnected.' : 'Gmail account disconnected from Taskvyn. Google revocation could not be confirmed.');
-      setMessageError(!result.providerRevoked);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Gmail account could not be disconnected.');
-      setMessageError(true);
-    } finally {
-      setActionId(null);
-    }
-  };
-
-  const statusLabel = (account: ConnectedAccount) => {
-    switch (account.status) {
-      case 'CONNECTED': return 'Connected';
-      case 'EXPIRED': return 'Connection expired';
-      case 'REVOKED': return 'Authorization revoked';
-      case 'CONNECTING': return 'Waiting for authorization';
-      default: return 'Connection needs attention';
-    }
-  };
-
-  if (Platform.OS === 'web') return <Text style={styles.accountNote}>Connect Gmail from the Taskvyn Android or iOS app.</Text>;
-
-  return <View>
-    {loading ? <View style={styles.accountLoading}><ActivityIndicator color="#555850" size="small" /><Text style={styles.accountNote}>Checking connected Gmail accounts…</Text></View> : null}
-    {!loading && accounts.length === 0 ? <View style={styles.accountCard}><View style={{ flex: 1 }}><Text style={styles.accountTitle}>Connect Gmail</Text><Text style={styles.configHint}>Choose a Gmail account for this workflow.</Text></View></View> : null}
-    {accounts.map((account) => <View key={account.id} style={styles.connectedAccountCard}>
-      <View style={styles.connectedAccountHeader}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.accountTitle}>Connected Account</Text>
-          {account.displayName ? <Text style={styles.connectedAccountName}>{account.displayName}</Text> : null}
-          <Text selectable style={styles.connectedAccountEmail}>{account.accountEmail}</Text>
-          <Text style={[styles.connectedAccountStatus, account.status !== 'CONNECTED' && styles.connectionStatusWarning]}>{statusLabel(account)}</Text>
-        </View>
-        <IconifyIcon color={account.status === 'CONNECTED' ? '#21825B' : '#BA7112'} name={account.status === 'CONNECTED' ? 'lucide:circle-check' : 'lucide:circle-alert'} size={19} />
-      </View>
-      <View style={styles.connectionActions}>
-        <Pressable accessibilityRole="button" disabled={actionId === account.id || connecting} onPress={() => void refresh(account)} style={styles.connectionActionButton}>
-          <Text style={styles.connectionActionText}>{actionId === account.id ? 'Checking…' : 'Check connection'}</Text>
-        </Pressable>
-        <Pressable accessibilityRole="button" disabled={actionId === account.id || connecting} onPress={() => void disconnect(account)} style={styles.connectionActionButton}>
-          <Text style={[styles.connectionActionText, styles.disconnectText]}>{actionId === account.id ? 'Working…' : 'Disconnect'}</Text>
-        </Pressable>
-      </View>
-    </View>)}
-    <Pressable accessibilityRole="button" disabled={connecting || loading || actionId !== null} onPress={() => void connect()} style={[styles.connectAccountButton, (connecting || loading || actionId !== null) && styles.connectAccountDisabled]}>
-      {connecting ? <ActivityIndicator color="#FFFFFF" size="small" /> : <IconifyIcon color="#FFFFFF" name="lucide:plus" size={16} />}
-      <Text style={styles.connectAccountText}>{connecting ? accounts.some((account) => account.status !== 'CONNECTED') ? 'Reconnecting…' : 'Connecting to Google…' : accounts.length ? 'Change Account' : 'Connect Account'}</Text>
-    </Pressable>
-    {connecting ? <Text style={styles.accountNote}>Waiting for authorization in Google’s secure sign-in page.</Text> : null}
-    {message ? <Text accessibilityRole="alert" style={[styles.connectionMessage, messageError && styles.connectionMessageError]}>{message}</Text> : null}
-  </View>;
-}
-
 export function WorkflowCanvas({ showGmailConnection = false }: { showGmailConnection?: boolean } = {}) {
   const [nodes, setNodes] = useState<FlowNode[]>([]);
   const [history, setHistory] = useState<FlowNode[][]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const header = useHeaderMetrics();
   const [target, setTarget] = useState<DrawerTarget | null>(null);
-  const [configApp, setConfigApp] = useState<AppDef | null>(() => showGmailConnection ? app('gmail') : null);
+  const [configApp, setConfigApp] = useState<AppDef | null>(null);
+  const [configKey, setConfigKey] = useState<string | null>(null);
   const [editingConfigNode, setEditingConfigNode] = useState<string | null>(null);
-  const [triggerEvent, setTriggerEvent] = useState('');
-  const [configTab, setConfigTab] = useState<'Setup' | 'Test'>('Setup');
+  // Per-node automation settings and the saved workflow they publish to.
+  const [stepDrafts, setStepDrafts] = useState<Record<string, StepDraft>>({});
+  const [workflow, setWorkflow] = useState<Workflow | null>(null);
+  const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
   const [running, setRunning] = useState(false);
   const [view, setView] = useState({ w: 390, h: 640 });
   const drawerAnim = useRef(new Animated.Value(0)).current;
-  const [configAnim] = useState(() => new Animated.Value(showGmailConnection ? 1 : 0));
+  const [configAnim] = useState(() => new Animated.Value(0));
+  void showGmailConnection; // Accounts are now connected inside each step's drawer.
   const [aiOpen, setAiOpen] = useState(false);
 
   const { pos, width, height } = useMemo(() => layout(nodes), [nodes]);
@@ -831,7 +638,7 @@ export function WorkflowCanvas({ showGmailConnection = false }: { showGmailConne
 
   const changeConfigApp = () => {
     Animated.timing(configAnim, { toValue: 0, duration: 180, useNativeDriver: NATIVE }).start();
-    setEditingConfigNode(selected);
+    setEditingConfigNode(configKey ?? selected);
     setConfigApp(null);
     openDrawer({ mode: 'child', parent: null });
   };
@@ -858,8 +665,9 @@ export function WorkflowCanvas({ showGmailConnection = false }: { showGmailConne
     setSelected(key);
     setEditingConfigNode(null);
     setConfigApp(a);
-    setTriggerEvent('');
-    setConfigTab('Setup');
+    setConfigKey(key);
+    // A different app means different events and fields.
+    if (!editNode || editNode.id !== a.id) setStepDrafts((current) => ({ ...current, [key]: { input: {} } }));
     closeDrawer();
     setTimeout(() => {
       Animated.spring(configAnim, { toValue: 1, damping: 26, stiffness: 210, useNativeDriver: NATIVE }).start();
@@ -1090,9 +898,91 @@ export function WorkflowCanvas({ showGmailConnection = false }: { showGmailConne
     setNodes(prev);
   };
 
-  const run = () => {
+  const openStepConfig = (key: string) => {
+    const node = nodes.find((n) => n.key === key);
+    if (!node) return;
+    setConfigKey(key);
+    setConfigApp(app(node.id) ?? node);
+    configAnim.setValue(0);
+    Animated.spring(configAnim, { toValue: 1, damping: 26, stiffness: 210, useNativeDriver: NATIVE }).start();
+  };
+
+  const updateStep = (key: string, draft: StepDraft, operationName?: string) => {
+    setStepDrafts((current) => ({ ...current, [key]: draft }));
+    if (operationName) setNodes((current) => current.map((n) => (n.key === key ? { ...n, subtitle: operationName } : n)));
+  };
+
+  const path = useMemo(() => mainPath(nodes), [nodes]);
+
+  /** Data earlier steps make available for mapping into a later step. */
+  const mappingSources = (key: string): MappingSource[] => {
+    const index = path.nodes.findIndex((n) => n.key === key);
+    return path.nodes.slice(0, Math.max(index, 0)).flatMap((n, position): MappingSource[] => {
+      const sample = stepDrafts[n.key]?.sample;
+      if (!sample) return [];
+      return [{ label: position === 0 ? `${n.label} (trigger)` : n.label, prefix: position === 0 ? 'trigger' : `steps.${n.key}`, sample }];
+    });
+  };
+
+  const showNotice = (text: string, error = false) => setNotice({ text, error });
+
+  /** Creates or updates the backend workflow from the canvas' main path. */
+  const saveWorkflow = async (): Promise<Workflow> => {
+    if (path.error) throw new Error(path.error);
+    if (path.nodes.length < 2) throw new Error('Add at least one action after the trigger.');
+    const toConfig = (n: FlowNode): WorkflowStepConfig => {
+      const draft = stepDrafts[n.key];
+      if (!draft?.operation) throw new Error(`Finish setting up “${n.label}”.`);
+      const input = Object.fromEntries(Object.entries(draft.input).filter(([, v]) => v !== undefined && v !== null && v !== ''));
+      return { id: n.key, app: n.id, operation: draft.operation, connectionId: draft.connectionId, input };
+    };
+    const [triggerNode, ...actionNodes] = path.nodes;
+    const body = {
+      name: `${triggerNode.label} → ${actionNodes.map((n) => n.label).join(' → ')}`.slice(0, 120),
+      trigger: toConfig(triggerNode),
+      steps: actionNodes.map(toConfig),
+    };
+    const saved = workflow ? await workflowsApi.update(workflow.id, body) : await workflowsApi.create(body);
+    setWorkflow(saved);
+    return saved;
+  };
+
+  /** Save + turn on: the trigger is polled and every new event runs the actions. */
+  const publish = async () => {
+    if (running) return;
     setRunning(true);
-    setTimeout(() => setRunning(false), 1600);
+    try {
+      const saved = await saveWorkflow();
+      const active = await workflowsApi.activate(saved.id);
+      setWorkflow(active);
+      showNotice(`Workflow is on. New ${path.nodes[0]?.label ?? 'trigger'} events are checked every ${Math.round(active.pollIntervalSeconds / 60)} minutes.`);
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : 'The workflow could not be published.', true);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  /** Runs every action once with the latest real trigger data, then reports the result. */
+  const run = async () => {
+    if (running) return;
+    setRunning(true);
+    try {
+      const saved = await saveWorkflow();
+      const started = await workflowsApi.runNow(saved.id);
+      showNotice('Running your workflow…');
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const latest = (await workflowsApi.runs(saved.id)).find((item) => item.id === started.id);
+        if (latest?.status === 'succeeded') { showNotice('Test run succeeded. Every step completed.'); return; }
+        if (latest?.status === 'failed') { showNotice(latest.error ?? 'The test run failed.', true); return; }
+      }
+      showNotice('The run is still in progress. It will retry automatically if an app is temporarily unavailable.');
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : 'The workflow could not run.', true);
+    } finally {
+      setRunning(false);
+    }
   };
 
   const drawerTitle =
@@ -1222,7 +1112,7 @@ export function WorkflowCanvas({ showGmailConnection = false }: { showGmailConne
                     isDragged && styles.nodePlaceholder,
                     isDrop && [styles.nodeDrop, { borderColor: n.accent, transform: [{ scale: dropPulse }] }],
                   ]}>
-                  <IconifyIcon name={n.icon} size={28} />
+                  <IconifyIcon color={n.iconColor} name={n.icon} size={28} />
                   <Text numberOfLines={1} style={styles.nodeLabel}>
                     {n.label}
                   </Text>
@@ -1316,7 +1206,7 @@ export function WorkflowCanvas({ showGmailConnection = false }: { showGmailConne
                     <View
                       key={a.id}
                       style={[styles.emptyLogo, { backgroundColor: a.bg, marginLeft: i ? -10 : 0, zIndex: 4 - i }]}>
-                      <IconifyIcon name={a.icon} size={17} />
+                      <IconifyIcon color={a.iconColor} name={a.icon} size={17} />
                     </View>
                   ))}
                   <View style={[styles.emptyLogo, styles.emptyLogoMore]}>
@@ -1382,8 +1272,8 @@ export function WorkflowCanvas({ showGmailConnection = false }: { showGmailConne
           </View>
 
           <View pointerEvents={dragKey ? 'none' : 'auto'} style={[styles.toolbar, dragKey && { opacity: 0 }]}>
-            <Pressable accessibilityLabel="Save" style={styles.toolBtn}>
-              <IconifyIcon color="#2A2B2D" name="lucide:save" size={18} />
+            <Pressable accessibilityLabel={workflow?.status === 'active' ? 'Save and keep workflow on' : 'Publish workflow'} onPress={() => void publish()} style={styles.toolBtn}>
+              <IconifyIcon color={workflow?.status === 'active' ? '#21825B' : '#2A2B2D'} name={workflow?.status === 'active' ? 'lucide:circle-check' : 'lucide:save'} size={18} />
             </Pressable>
             <Pressable accessibilityLabel="Export" style={styles.toolBtn}>
               <IconifyIcon color="#2A2B2D" name="lucide:download" size={18} />
@@ -1401,7 +1291,21 @@ export function WorkflowCanvas({ showGmailConnection = false }: { showGmailConne
               <IconifyIcon color="#2A2B2D" name="lucide:ellipsis" size={19} />
             </Pressable>
           </View>
-          <Header onRun={run} running={running} />
+          <Header onRun={() => void run()} running={running} />
+
+          {notice ? <Pressable accessibilityRole="alert" onPress={() => setNotice(null)}
+            style={[styles.notice, notice.error && styles.noticeError, { top: header.top + header.btn + 12 }]}>
+            <IconifyIcon color={notice.error ? '#B42318' : '#21825B'} name={notice.error ? 'lucide:circle-alert' : 'lucide:circle-check'} size={16} />
+            <Text style={styles.noticeText}>{notice.text}</Text>
+            <IconifyIcon color="#8B8D87" name="lucide:x" size={14} />
+          </Pressable> : null}
+
+          {selected && !configApp && !target && !dragKey && nodes.some((n) => n.key === selected) ? (
+            <Pressable accessibilityRole="button" accessibilityLabel="Edit selected step" onPress={() => openStepConfig(selected)} style={styles.editPill}>
+              <IconifyIcon color="#FFFFFF" name="lucide:pencil" size={14} />
+              <Text style={styles.editPillText}>{stepDrafts[selected]?.operation ? 'Edit step' : 'Set up step'}</Text>
+            </Pressable>
+          ) : null}
 
           {dragKey
             ? (() => {
@@ -1422,7 +1326,7 @@ export function WorkflowCanvas({ showGmailConnection = false }: { showGmailConne
                       transform: [{ translateX: ghost.x }, { translateY: ghost.y }, { scale: lift }],
                     },
                   ]}>
-                  <IconifyIcon name={n.icon} size={28} />
+                  <IconifyIcon color={n.iconColor} name={n.icon} size={28} />
                   <Text numberOfLines={1} style={styles.nodeLabel}>
                     {n.label}
                   </Text>
@@ -1440,10 +1344,41 @@ export function WorkflowCanvas({ showGmailConnection = false }: { showGmailConne
         {target ? (
           <Drawer anim={drawerAnim} onClose={closeDrawer} onPick={pick} title={drawerTitle} />
         ) : null}
-        {configApp ? <AppConfigDrawer app={configApp} event={triggerEvent} onEvent={setTriggerEvent} tab={configTab} onTab={setConfigTab} anim={configAnim} onClose={closeConfig} onChange={changeConfigApp} /> : null}
+        {configApp && configKey ? (() => {
+          const node = nodes.find((n) => n.key === configKey);
+          const index = path.nodes.findIndex((n) => n.key === configKey);
+          return <StepConfigDrawer
+            key={`${configKey}:${configApp.id}`}
+            app={configApp}
+            role={node?.parent ? 'action' : 'trigger'}
+            stepNumber={index >= 0 ? index + 1 : 1}
+            value={stepDrafts[configKey] ?? { input: {} }}
+            sources={mappingSources(configKey)}
+            anim={configAnim}
+            onChange={(draft, operationName) => updateStep(configKey, draft, operationName)}
+            onClose={closeConfig}
+            onChangeApp={changeConfigApp}
+          />;
+        })() : null}
       </View>
     </View>
   );
+}
+
+/** Workflows run one straight line of steps: the trigger, then each action in order. */
+function mainPath(nodes: FlowNode[]): { nodes: FlowNode[]; error?: string } {
+  const roots = nodes.filter((n) => n.parent === null);
+  if (!roots.length) return { nodes: [], error: 'Add a trigger to start your workflow.' };
+  if (roots.length > 1) return { nodes: [roots[0]], error: 'A workflow can only have one trigger. Remove the extra starting step.' };
+  const ordered = [roots[0]];
+  for (let current = roots[0]; ;) {
+    const children = nodes.filter((n) => n.parent === current.key);
+    if (!children.length) break;
+    if (children.length > 1) return { nodes: ordered, error: `Branching after “${current.label}” isn’t supported yet. Keep the steps in a single line.` };
+    current = children[0];
+    ordered.push(current);
+  }
+  return { nodes: ordered };
 }
 
 const shadow = {
@@ -1782,6 +1717,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  notice: {
+    position: 'absolute', left: 16, right: 16, zIndex: 40, flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingVertical: 12, paddingHorizontal: 14, borderRadius: 14, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DDE8E1',
+    shadowColor: '#14161A', shadowOpacity: 0.12, shadowRadius: 18, shadowOffset: { width: 0, height: 6 }, elevation: 8,
+  },
+  noticeError: { borderColor: '#F3D2CF' },
+  noticeText: { flex: 1, color: '#242528', fontSize: 12.5, lineHeight: 18, fontWeight: '500' },
+  editPill: {
+    position: 'absolute', bottom: 92, alignSelf: 'center', zIndex: 30, flexDirection: 'row', alignItems: 'center', gap: 7,
+    paddingVertical: 10, paddingHorizontal: 16, borderRadius: 999, backgroundColor: '#17181A',
+    shadowColor: '#14161A', shadowOpacity: 0.2, shadowRadius: 14, shadowOffset: { width: 0, height: 6 }, elevation: 8,
+  },
+  editPillText: { color: '#FFFFFF', fontSize: 13, fontWeight: '700' },
   drawerLayer: { ...StyleSheet.absoluteFill, zIndex: 100, elevation: 100 } as object,
   scrim: { ...StyleSheet.absoluteFill, backgroundColor: '#0E0F11' } as object,
 drawer: {

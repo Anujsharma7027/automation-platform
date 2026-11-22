@@ -1,6 +1,6 @@
 import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 
-export class GmailCallbackDto {
+export class OAuthCallbackDto {
   @IsOptional()
   @IsString()
   @MinLength(1)

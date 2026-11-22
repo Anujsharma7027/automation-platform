@@ -12,8 +12,9 @@ export class ConnectedAccount {
   @Prop({ type: Types.ObjectId, required: true, ref: 'User' })
   userId!: Types.ObjectId;
 
-  @Prop({ required: true, enum: ['gmail'], immutable: true })
-  provider!: 'gmail';
+  /** OAuth provider id (e.g. `google`). Validated against the provider registry. */
+  @Prop({ required: true, trim: true, maxlength: 64 })
+  provider!: string;
 
   @Prop({ required: true, trim: true, maxlength: 255 })
   externalAccountId!: string;

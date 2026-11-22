@@ -134,10 +134,12 @@ export async function hasStoredSession() {
 export type ConnectionStatus = 'CONNECTING' | 'CONNECTED' | 'EXPIRED' | 'REVOKED' | 'ERROR';
 export type ConnectedAccount = {
   id: string;
-  provider: 'gmail';
+  provider: string;
   accountEmail: string;
   displayName?: string;
   grantedScopes: string[];
+  /** Apps this account has granted every permission for. */
+  authorizedApps: string[];
   status: ConnectionStatus;
   accessTokenExpiresAt: string;
   lastValidatedAt?: string;
@@ -146,15 +148,75 @@ export type ConnectedAccount = {
 };
 
 export const connectionsApi = {
-  beginGmailConnect: () => api<{ authorizationUrl: string; callbackUrl: string; expiresAt: string }>(
-    '/connections/gmail/connect', { method: 'POST' }, true,
+  /** Starts OAuth for a provider, requesting permissions for the given apps. */
+  beginConnect: (provider: string, apps: string[]) => api<{ authorizationUrl: string; callbackUrl: string; expiresAt: string }>(
+    `/connections/${encodeURIComponent(provider)}/connect`, { method: 'POST', body: JSON.stringify({ apps }) }, true,
   ),
-  list: (provider?: 'gmail') => api<ConnectedAccount[]>(
-    `/connections${provider ? `?provider=${provider}` : ''}`, {}, true,
-  ),
+  beginGmailConnect: () => connectionsApi.beginConnect('google', ['gmail']),
+  list: (filter: { provider?: string; app?: string } = {}) => {
+    const query = new URLSearchParams(Object.entries(filter).filter(([, value]) => Boolean(value)) as [string, string][]).toString();
+    return api<ConnectedAccount[]>(`/connections${query ? `?${query}` : ''}`, {}, true);
+  },
   get: (id: string) => api<ConnectedAccount>(`/connections/${encodeURIComponent(id)}`, {}, true),
   refresh: (id: string) => api<ConnectedAccount>(`/connections/${encodeURIComponent(id)}/refresh`, { method: 'POST' }, true),
   disconnect: (id: string) => api<{ id: string; disconnected: true; providerRevoked: boolean }>(
     `/connections/${encodeURIComponent(id)}`, { method: 'DELETE' }, true,
   ),
+};
+
+export type FieldType = 'string' | 'text' | 'email' | 'number' | 'boolean' | 'datetime' | 'select' | 'string[]' | 'json';
+export type FieldDefinition = {
+  key: string; label: string; type: FieldType; required?: boolean; helpText?: string; placeholder?: string;
+  default?: unknown; options?: { label: string; value: string }[]; dynamicOptions?: string;
+};
+export type OperationDefinition = {
+  key: string; name: string; description: string; inputFields: FieldDefinition[]; sample: Record<string, unknown>; type?: 'polling' | 'webhook';
+};
+export type IntegrationApp = {
+  key: string; name: string; description: string; icon: string; category: string;
+  auth: { type: 'oauth2'; provider: string; scopes: string[] } | { type: 'none' };
+  triggers: OperationDefinition[]; actions: OperationDefinition[];
+};
+
+let catalogCache: Promise<IntegrationApp[]> | null = null;
+
+export const integrationsApi = {
+  /** Installed apps and what they can do (cached for the session). */
+  catalog: () => {
+    if (!catalogCache) catalogCache = api<IntegrationApp[]>('/integrations', {}, true).catch((error: unknown) => { catalogCache = null; throw error; });
+    return catalogCache;
+  },
+  options: (app: string, loader: string, connectionId: string | undefined, input: Record<string, unknown>) =>
+    api<{ label: string; value: string }[]>(`/integrations/${app}/options/${loader}`, { method: 'POST', body: JSON.stringify({ connectionId, input }) }, true),
+  testTrigger: (app: string, trigger: string, connectionId: string | undefined, input: Record<string, unknown>) =>
+    api<{ items: { id: string; data: Record<string, unknown> }[]; usedSample: boolean; sample: Record<string, unknown> }>(
+      `/integrations/${app}/triggers/${trigger}/test`, { method: 'POST', body: JSON.stringify({ connectionId, input }) }, true),
+};
+
+export type WorkflowStepConfig = { id: string; app: string; operation: string; connectionId?: string | null; input: Record<string, unknown> };
+export type Workflow = {
+  id: string; name: string; status: 'draft' | 'active' | 'paused' | 'error'; statusReason: string | null;
+  trigger: WorkflowStepConfig; steps: WorkflowStepConfig[]; pollIntervalSeconds: number; lastRunAt: string | null;
+  triggerState: { initialized: boolean; lastPolledAt: string | null; lastError: string | null; consecutiveFailures: number };
+};
+export type WorkflowRun = {
+  id: string; status: 'queued' | 'running' | 'succeeded' | 'failed'; manual: boolean; error: string | null; createdAt: string;
+  steps: { stepId: string; app: string; operation: string; status: string; error?: string }[];
+};
+type WorkflowBody = { name: string; trigger: WorkflowStepConfig; steps: WorkflowStepConfig[]; pollIntervalSeconds?: number };
+
+const clean = (step: WorkflowStepConfig): WorkflowStepConfig => ({
+  id: step.id, app: step.app, operation: step.operation, input: step.input, ...(step.connectionId ? { connectionId: step.connectionId } : {}),
+});
+
+export const workflowsApi = {
+  list: () => api<Workflow[]>('/workflows', {}, true),
+  create: (body: WorkflowBody) => api<Workflow>('/workflows', { method: 'POST', body: JSON.stringify({ ...body, trigger: clean(body.trigger), steps: body.steps.map(clean) }) }, true),
+  update: (id: string, body: Partial<WorkflowBody>) => api<Workflow>(`/workflows/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ ...body, ...(body.trigger ? { trigger: clean(body.trigger) } : {}), ...(body.steps ? { steps: body.steps.map(clean) } : {}) }),
+  }, true),
+  activate: (id: string) => api<Workflow>(`/workflows/${id}/activate`, { method: 'POST' }, true),
+  pause: (id: string) => api<Workflow>(`/workflows/${id}/pause`, { method: 'POST' }, true),
+  runNow: (id: string) => api<WorkflowRun>(`/workflows/${id}/run`, { method: 'POST' }, true),
+  runs: (id: string) => api<WorkflowRun[]>(`/workflows/${id}/runs?limit=10`, {}, true),
 };

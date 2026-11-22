@@ -1,33 +1,34 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OAuth2Client } from 'google-auth-library';
-import { IntegrationProvider, ProviderAccount, ProviderTokens } from './integration-provider';
+import { OAuthProvider, ProviderAccount, ProviderTokens } from './integration-provider';
 
-const GMAIL_READONLY = 'https://www.googleapis.com/auth/gmail.readonly';
 const USERINFO_URL = 'https://openidconnect.googleapis.com/v1/userinfo';
 const REQUEST_TIMEOUT_MS = 10_000;
+const IDENTITY_SCOPES = ['openid', 'email', 'profile'];
 
-interface GoogleUserInfo {
-  sub?: string;
-  email?: string;
-  email_verified?: boolean;
-  name?: string;
-}
+interface GoogleUserInfo { sub?: string; email?: string; email_verified?: boolean; name?: string }
 
+/**
+ * One Google OAuth client for every Google app. Apps request their own scopes and
+ * Google's incremental authorization merges them into the same account grant.
+ */
 @Injectable()
-export class GmailProvider implements IntegrationProvider {
-  readonly id = 'gmail';
-  readonly name = 'Gmail';
-  readonly scopes = ['openid', 'email', 'profile', GMAIL_READONLY] as const;
+export class GoogleOAuthProvider implements OAuthProvider {
+  readonly id = 'google';
+  readonly name = 'Google';
+  /** Older connections were stored under this provider id. */
+  readonly aliases = ['gmail'];
+  readonly identityScopes = IDENTITY_SCOPES;
 
   constructor(private readonly config: ConfigService) {}
 
-  createAuthorizationUrl(state: string): string {
+  createAuthorizationUrl(state: string, scopes: string[]): string {
     return this.client().generateAuthUrl({
       access_type: 'offline',
       include_granted_scopes: true,
       prompt: 'consent select_account',
-      scope: [...this.scopes],
+      scope: [...new Set([...IDENTITY_SCOPES, ...scopes])],
       state,
     });
   }
@@ -35,13 +36,11 @@ export class GmailProvider implements IntegrationProvider {
   async exchangeCode(code: string): Promise<ProviderTokens> {
     const { tokens } = await this.client().getToken(code);
     if (!tokens.access_token || !tokens.expiry_date) throw new Error('Google did not return usable authorization credentials');
-    const scopes = splitScopes(tokens.scope);
-    if (!scopes.includes(GMAIL_READONLY)) throw new Error('Google did not grant Gmail read-only access');
     return {
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
       expiresAt: new Date(tokens.expiry_date),
-      scopes,
+      scopes: splitScopes(tokens.scope),
     };
   }
 
@@ -77,12 +76,23 @@ export class GmailProvider implements IntegrationProvider {
     await this.client().revokeToken(refreshToken);
   }
 
+  isInvalidGrant(error: unknown): boolean {
+    if (typeof error !== 'object' || error === null || !('response' in error)) return false;
+    return (error as { response?: { data?: { error?: unknown } } }).response?.data?.error === 'invalid_grant';
+  }
+
+  isUnauthorized(error: unknown): boolean {
+    if (typeof error !== 'object' || error === null || !('response' in error)) return false;
+    return (error as { response?: { status?: unknown } }).response?.status === 401;
+  }
+
   private client(): OAuth2Client {
-    const clientId = this.config.get<string>('GOOGLE_GMAIL_CLIENT_ID')?.trim();
-    const clientSecret = this.config.get<string>('GOOGLE_GMAIL_CLIENT_SECRET')?.trim();
-    const redirectUri = this.config.get<string>('GOOGLE_GMAIL_REDIRECT_URI')?.trim();
+    const read = (name: string, legacy: string) => (this.config.get<string>(name) ?? this.config.get<string>(legacy))?.trim();
+    const clientId = read('GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_GMAIL_CLIENT_ID');
+    const clientSecret = read('GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_GMAIL_CLIENT_SECRET');
+    const redirectUri = read('GOOGLE_OAUTH_REDIRECT_URI', 'GOOGLE_GMAIL_REDIRECT_URI');
     if (!clientId || !clientSecret || !redirectUri) {
-      throw new ServiceUnavailableException('Gmail account connections are not configured');
+      throw new ServiceUnavailableException('Google account connections are not configured');
     }
     return new OAuth2Client({
       clientId,
