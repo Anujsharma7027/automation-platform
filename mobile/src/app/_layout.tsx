@@ -19,6 +19,7 @@ function Routes() {
     <View style={styles.root}>
       <Stack screenOptions={{ animation: 'fade', contentStyle: { backgroundColor: '#000000' }, headerShown: false }}>
         <Stack.Screen name="index" />
+        <Stack.Screen name="gmail" />
         <Stack.Protected guard={!signedIn}>
           <Stack.Screen name="sign-in" /><Stack.Screen name="sign-up" />
           <Stack.Screen name="forgot-password" /><Stack.Screen name="reset-password" /><Stack.Screen name="verify-email" />
